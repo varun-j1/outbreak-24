@@ -48,6 +48,11 @@
 .mapbox-field .mapboxgl-canvas { outline: none; }
 .mapbox-field .mapboxgl-ctrl-bottom-left, .mapbox-field .mapboxgl-ctrl-bottom-right { z-index: 4; }
 .mapbox-field .mapboxgl-ctrl-bottom-right { right: 58px; bottom: 5px; }
+.mapbox-field .leaflet-container { height: 100%; width: 100%; background: #0a151a; font-family: "Manrope", Arial, sans-serif; }
+.mapbox-field .leaflet-pane, .mapbox-field .leaflet-top, .mapbox-field .leaflet-bottom { z-index: auto; }
+.mapbox-field .leaflet-control-attribution { padding: 1px 5px; background: rgba(7,17,22,.7); color: #8ba0ab; font-size: 9px; }
+.mapbox-field .leaflet-control-attribution a { color: #8ba0ab; }
+.field-map__leaflet-marker { background: transparent; border: 0; }
 .field-map__control { display: grid; height: 42px; width: 42px; place-items: center; border: 1px solid rgba(255,255,255,.18); border-radius: 12px; background: rgba(7,17,22,.94); color: #ccf9f4; box-shadow: 0 8px 24px rgba(0,0,0,.34); }
 .field-map__control--active { border-color: rgba(35,224,207,.85); background: #173c3b; color: #57f1e3; }
 .field-map__ping { display: flex; min-width: 174px; max-width: 224px; align-items: center; gap: 9px; padding: 6px 10px 6px 6px; border: 3px solid #061014; border-radius: 999px; background: #2be1d0; color: #061014; box-shadow: 0 10px 24px rgba(0,0,0,.44); transform: translateY(-8px); }
