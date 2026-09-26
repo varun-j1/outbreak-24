@@ -1,0 +1,89 @@
+export const DEFAULT_RULES = {
+  headStartSeconds: 45,
+  matchSeconds: 12 * 60,
+  extractionOpensAtSeconds: 10 * 60,
+  extractionHoldSeconds: 10,
+  trailLifetimeSeconds: 100,
+  trailExitExposureSeconds: 15,
+  trailWidthMeters: 14,
+  boundaryGraceSeconds: 20,
+  boundaryForfeitSeconds: 60,
+  captureTurnSeconds: 15,
+  initialRadiusMeters: 240,
+  minimumRadiusMeters: 100,
+};
+
+export type GameRules = typeof DEFAULT_RULES;
+export type Coordinate = { lat: number; lng: number };
+
+const EARTH_RADIUS_M = 6_371_000;
+const toRadians = (value: number) => (value * Math.PI) / 180;
+
+export function metersBetween(a: Coordinate, b: Coordinate): number {
+  const dLat = toRadians(b.lat - a.lat);
+  const dLng = toRadians(b.lng - a.lng);
+  const lat1 = toRadians(a.lat);
+  const lat2 = toRadians(b.lat);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * EARTH_RADIUS_M * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+/** Approximate local projection is accurate enough for short outdoor game segments. */
+export function distanceToSegmentMeters(
+  point: Coordinate,
+  start: Coordinate,
+  end: Coordinate,
+): number {
+  const latitudeScale = 111_320;
+  const longitudeScale = 111_320 * Math.cos(toRadians(point.lat));
+  const sx = (start.lng - point.lng) * longitudeScale;
+  const sy = (start.lat - point.lat) * latitudeScale;
+  const ex = (end.lng - point.lng) * longitudeScale;
+  const ey = (end.lat - point.lat) * latitudeScale;
+  const dx = ex - sx;
+  const dy = ey - sy;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0) return Math.hypot(sx, sy);
+  const t = Math.max(0, Math.min(1, -(sx * dx + sy * dy) / lengthSquared));
+  return Math.hypot(sx + t * dx, sy + t * dy);
+}
+
+export function pingIntervalSeconds(survivorCount: number, random = Math.random): number {
+  const [min, max] = survivorCount >= 3 ? [45, 60] : survivorCount === 2 ? [60, 90] : [90, 120];
+  return Math.floor(min + random() * (max - min + 1));
+}
+
+export function parseRules(input?: string | null): GameRules {
+  try {
+    const parsed = input ? JSON.parse(input) : {};
+    return { ...DEFAULT_RULES, ...parsed };
+  } catch {
+    return DEFAULT_RULES;
+  }
+}
+
+export function elapsedGameSeconds(startedAt: Date | null, pausedSeconds: number, now = new Date()): number {
+  if (!startedAt) return 0;
+  return Math.max(0, Math.floor((now.getTime() - startedAt.getTime()) / 1000) - pausedSeconds);
+}
+
+export function effectiveStormRadius(
+  game: { currentRadius: number; minimumRadius: number; stormPhase: string; stormPhaseEndsAt: Date | null },
+  now = new Date(),
+): number {
+  if (game.stormPhase !== "contracting" || !game.stormPhaseEndsAt) return game.currentRadius;
+  const phaseStartedAt = game.stormPhaseEndsAt.getTime() - 30_000;
+  const progress = Math.min(1, Math.max(0, (now.getTime() - phaseStartedAt) / 30_000));
+  return Math.max(game.minimumRadius, game.currentRadius * (1 - 0.15 * progress));
+}
+
+export function markerPositionWithinBounds(
+  center: Coordinate,
+  point: Coordinate,
+  radiusMeters: number,
+  paddingMeters = 0,
+): boolean {
+  return metersBetween(center, point) <= Math.max(0, radiusMeters - paddingMeters);
+}
