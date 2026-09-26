@@ -25,8 +25,8 @@ export const appRouter = router({
     saveSetup: publicProcedure.input(sessionInput.extend({
       centerLat: z.number().gte(-90).lte(90),
       centerLng: z.number().gte(-180).lte(180),
-      initialRadius: z.number().min(50).max(2_000),
-      minimumRadius: z.number().min(25).max(1_500),
+      initialRadius: z.number().min(100).max(5_000),
+      minimumRadius: z.number().min(50).max(4_000),
       points: z.array(z.object({ id: z.string().optional(), type: z.enum(["extraction", "powerup_candidate"]), label: z.string().min(1).max(32), lat: z.number(), lng: z.number() })).max(12),
     })).mutation(({ input }) => updateSetup(input, input)),
     setReady: publicProcedure.input(sessionInput.extend({ isReady: z.boolean() })).mutation(({ input }) => setReady(input, input.isReady)),

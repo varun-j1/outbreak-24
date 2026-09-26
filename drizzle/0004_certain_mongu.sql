@@ -1,0 +1,1 @@
+ALTER TABLE `gamePoints` ADD `isActive` boolean DEFAULT false NOT NULL;

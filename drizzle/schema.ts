@@ -77,6 +77,7 @@ export const gamePoints = mysqlTable("gamePoints", {
   label: varchar("label", { length: 32 }).notNull(),
   lat: double("lat").notNull(),
   lng: double("lng").notNull(),
+  isActive: boolean("isActive").default(false).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, table => [index("game_points_game_idx").on(table.gameId)]);
 

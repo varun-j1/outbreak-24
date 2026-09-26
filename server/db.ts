@@ -76,7 +76,8 @@ export async function createGame(displayName: string) {
   const playerToken = token();
   const hostRejoinCode = rejoinCode();
   const joinCode = await makeJoinCode();
-  const defaultCenter = { lat: 37.7749, lng: -122.4194 };
+  // The University of Adelaide, North Terrace campus — hosts can replace this with GPS in setup.
+  const defaultCenter = { lat: -34.92051, lng: 138.60456 };
   await db.insert(games).values({
     id: gameId,
     joinCode,
@@ -155,7 +156,7 @@ export async function updateSetup(session: GuestSession, setup: { centerLat: num
   if (!player.isHost) throw new Error("Only the host can configure the playing area.");
   if (setup.minimumRadius > setup.initialRadius) throw new Error("The minimum radius cannot exceed the starting radius.");
   const extractionPoints = setup.points.filter(point => point.type === "extraction");
-  if (extractionPoints.length > 2) throw new Error("Use at most two extraction points.");
+  if (extractionPoints.length < 2 || extractionPoints.length > 4) throw new Error("Place between two and four potential extraction points.");
   if (extractionPoints.some(point => !markerPositionWithinBounds({ lat: setup.centerLat, lng: setup.centerLng }, point, setup.minimumRadius, 20))) {
     throw new Error("Extraction points must fit inside the smallest zone.");
   }
@@ -170,7 +171,7 @@ export async function updateSetup(session: GuestSession, setup: { centerLat: num
   await db.delete(gamePoints).where(eq(gamePoints.gameId, session.gameId));
   if (setup.points.length) {
     await db.insert(gamePoints).values(setup.points.map(point => ({
-      id: point.id ?? id(), gameId: session.gameId, type: point.type, label: point.label, lat: point.lat, lng: point.lng,
+      id: point.id ?? id(), gameId: session.gameId, type: point.type, label: point.label, lat: point.lat, lng: point.lng, isActive: false,
     })));
   }
   await addEvent(session.gameId, "setup_saved", player.id, null, "public", { points: setup.points.length });
@@ -207,6 +208,7 @@ export async function startGame(session: GuestSession) {
     zombies = [chosen];
   }
   const now = new Date();
+  await db.update(gamePoints).set({ isActive: false }).where(and(eq(gamePoints.gameId, session.gameId), eq(gamePoints.type, "extraction")));
   await db.update(games).set({
     status: "running", startedAt: now, pausedAt: null, pausedSeconds: 0, nextPingAt: new Date(now.getTime() + 55_000),
     lastCaptureAt: now, stormPhase: "normal", stormPhaseEndsAt: null, lastItemSpawnAt: now, winner: null, finishedAt: null,
@@ -264,6 +266,16 @@ export async function tickGame(gameId: string) {
     await db.update(games).set({ status: "finished", winner: "zombies", finishedAt: now }).where(eq(games.id, game.id));
     await addEvent(game.id, "match_finished", null, null, "public", { winner: "zombies", reason: "no_survivors" });
     return;
+  }
+  if (elapsed >= rules.extractionOpensAtSeconds) {
+    const extractionPoints = await db.select().from(gamePoints).where(and(eq(gamePoints.gameId, game.id), eq(gamePoints.type, "extraction")));
+    if (!extractionPoints.some(point => point.isActive) && extractionPoints.length >= 2) {
+      const selected = [...extractionPoints]
+        .sort(() => Math.random() - 0.5)
+        .slice(0, 2);
+      await Promise.all(selected.map(point => db.update(gamePoints).set({ isActive: true }).where(eq(gamePoints.id, point.id))));
+      await addEvent(game.id, "extraction_points_revealed", null, null, "public", { points: selected.map(point => point.label) });
+    }
   }
   if (game.nextPingAt && game.nextPingAt <= now) {
     for (const player of survivors) {
@@ -362,7 +374,7 @@ export async function reportLocation(session: GuestSession, location: { lat: num
   }
   let extractionStartedAt = player.extractionStartedAt;
   if (player.role === "survivor" && status === "active" && elapsedGameSeconds(game.startedAt, game.pausedSeconds, now) >= rules.extractionOpensAtSeconds) {
-    const extraction = await db.select().from(gamePoints).where(and(eq(gamePoints.gameId, game.id), eq(gamePoints.type, "extraction")));
+    const extraction = await db.select().from(gamePoints).where(and(eq(gamePoints.gameId, game.id), eq(gamePoints.type, "extraction"), eq(gamePoints.isActive, true)));
     const insideExtraction = extraction.some(point => metersBetween(current, point) <= 20 + Math.max(0, location.accuracy || 0));
     if (insideExtraction) {
       extractionStartedAt ??= now;
@@ -461,11 +473,14 @@ export async function gameSnapshot(session: GuestSession) {
   const visibleItems = items.filter(item => item.faction === viewer.role).filter(item => item.expiresAt > now);
   const rules = parseRules(game.rulesJson);
   const staleLocationSeconds = viewer.lastLocationAt ? Math.max(0, Math.floor((now.getTime() - viewer.lastLocationAt.getTime()) / 1000)) : null;
+  const visiblePoints = game.status === "running"
+    ? points.filter(point => point.type === "extraction" && point.isActive)
+    : points;
   return {
     game: { ...game, currentRadius: effectiveStormRadius(game, now), rules, elapsedSeconds: elapsedGameSeconds(game.startedAt, game.pausedSeconds, now) },
     viewer: { id: viewer.id, name: viewer.displayName, role: viewer.role, status: viewer.status, isHost: viewer.isHost, inventory: viewer.inventory, videoSkipArmed: viewer.videoSkipArmed, videoDueAt: viewer.videoDueAt, videoUploadDeadlineAt: viewer.videoUploadDeadlineAt, staleLocationSeconds, extractionStartedAt: viewer.extractionStartedAt, boundaryOutsideSince: viewer.boundaryOutsideSince },
     players: visiblePlayers,
-    points,
+    points: visiblePoints,
     trails: viewer.role === "zombie" || isHost ? trails : [],
     items: visibleItems,
     events: visibleEvents.map(event => ({ ...event, payload: event.payloadJson ? JSON.parse(event.payloadJson) : {} })),

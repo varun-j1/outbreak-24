@@ -9,8 +9,8 @@ export const DEFAULT_RULES = {
   boundaryGraceSeconds: 20,
   boundaryForfeitSeconds: 60,
   captureTurnSeconds: 15,
-  initialRadiusMeters: 240,
-  minimumRadiusMeters: 100,
+  initialRadiusMeters: 500,
+  minimumRadiusMeters: 150,
 };
 
 export type GameRules = typeof DEFAULT_RULES;

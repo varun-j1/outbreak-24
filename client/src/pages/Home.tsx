@@ -46,7 +46,7 @@ export default function Home() {
         <div className="mt-8 grid max-w-xl grid-cols-3 gap-3 text-center text-xs">
           {[[UsersRound, "2–8", "PLAYERS"], [Compass, "GPS", "TRACKING"], [Crosshair, "12 MIN", "MATCH"]].map(([Icon, value, label]) => { const FeatureIcon = Icon as typeof UsersRound; return <div key={String(label)} className="rounded-xl border border-white/8 bg-[#0b181e]/75 px-3 py-4"><FeatureIcon className="mx-auto mb-2 text-teal-200" size={20} /><div className="font-black text-white">{String(value)}</div><div className="mt-1 text-[9px] font-bold tracking-[0.16em] text-slate-500">{String(label)}</div></div>; })}
         </div>
-        <p className="mt-6 max-w-xl text-xs leading-5 text-slate-500">Play outdoors in a safe, permitted area. Your browser will request location and camera only when the game needs them.</p>
+        <p className="mt-6 max-w-xl text-xs leading-5 text-slate-500">Play outdoors in a safe, permitted area. Before getting ready, each player explicitly grants precise location and camera access.</p>
       </div>
 
       <div className="relative rounded-[1.75rem] border border-white/10 bg-[#0b181e]/95 p-5 shadow-2xl shadow-black/40 sm:p-7">
