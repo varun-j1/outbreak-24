@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { distanceToSegmentMeters, effectiveStormRadius, metersBetween, pingIntervalSeconds } from "./game-logic";
+import { deriveRules, distanceToSegmentMeters, effectiveStormRadius, metersBetween, pingIntervalSeconds } from "./game-logic";
 
 describe("game rule utilities", () => {
   it("measures short outdoor distances", () => {
@@ -23,6 +23,16 @@ describe("game rule utilities", () => {
     expect(pingIntervalSeconds(2, () => 0.999)).toBe(90);
     expect(pingIntervalSeconds(1, () => 0)).toBe(90);
     expect(pingIntervalSeconds(1, () => 0.999)).toBe(120);
+  });
+
+  it("derives late extraction and adaptive drops from host match duration", () => {
+    const short = deriveRules(6);
+    const long = deriveRules(30);
+    expect(short.matchSeconds).toBe(360);
+    expect(short.extractionOpensAtSeconds).toBeLessThan(short.matchSeconds);
+    expect(short.powerupStartsAtSeconds).toBeLessThan(short.extractionOpensAtSeconds);
+    expect(long.extractionOpensAtSeconds).toBeGreaterThan(short.extractionOpensAtSeconds);
+    expect(long.powerupIntervalSeconds).toBeGreaterThanOrEqual(short.powerupIntervalSeconds);
   });
 
   it("contracts the zone continuously during the announced shrink", () => {

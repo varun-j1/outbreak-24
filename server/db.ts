@@ -12,7 +12,7 @@ import {
   InsertUser,
   users,
 } from "../drizzle/schema";
-import { DEFAULT_RULES, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, markerPositionWithinBounds, metersBetween, parseRules, pingIntervalSeconds } from "./game-logic";
+import { DEFAULT_RULES, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, markerPositionWithinBounds, metersBetween, parseRules, pingIntervalSeconds } from "./game-logic";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -151,7 +151,7 @@ export async function addEvent(
   await db.insert(gameEvents).values({ id: id(), gameId, type, actorPlayerId, targetPlayerId, visibility, payloadJson: JSON.stringify(payload) });
 }
 
-export async function updateSetup(session: GuestSession, setup: { centerLat: number; centerLng: number; initialRadius: number; minimumRadius: number; points: Array<{ id?: string; type: "extraction" | "powerup_candidate"; label: string; lat: number; lng: number }> }) {
+export async function updateSetup(session: GuestSession, setup: { centerLat: number; centerLng: number; initialRadius: number; minimumRadius: number; matchMinutes: number; points: Array<{ id?: string; type: "extraction" | "powerup_candidate"; label: string; lat: number; lng: number }> }) {
   const db = await requireDb();
   const player = await getSessionPlayer(session);
   if (!player.isHost) throw new Error("Only the host can configure the playing area.");
@@ -167,6 +167,7 @@ export async function updateSetup(session: GuestSession, setup: { centerLat: num
     initialRadius: setup.initialRadius,
     minimumRadius: setup.minimumRadius,
     currentRadius: setup.initialRadius,
+    rulesJson: JSON.stringify(deriveRules(setup.matchMinutes)),
     status: "lobby",
   }).where(eq(games.id, session.gameId));
   await db.delete(gamePoints).where(eq(gamePoints.gameId, session.gameId));
@@ -210,12 +211,13 @@ export async function startGame(session: GuestSession) {
   }
   const now = new Date();
   await db.update(gamePoints).set({ isActive: false }).where(and(eq(gamePoints.gameId, session.gameId), eq(gamePoints.type, "extraction")));
+  const rules = parseRules(game.rulesJson);
   await db.update(games).set({
-    status: "running", startedAt: now, pausedAt: null, pausedSeconds: 0, nextPingAt: new Date(now.getTime() + 55_000),
+    status: "running", startedAt: now, pausedAt: null, pausedSeconds: 0, nextPingAt: new Date(now.getTime() + (rules.headStartSeconds + pingIntervalSeconds(players.filter(player => player.role === "survivor").length, rules.matchSeconds)) * 1_000),
     lastCaptureAt: now, stormPhase: "normal", stormPhaseEndsAt: null, lastItemSpawnAt: now, winner: null, finishedAt: null,
   }).where(eq(games.id, session.gameId));
   await db.update(gamePlayers).set({ status: "active", extractionStartedAt: null, boundaryOutsideSince: null, boundaryExposed: false }).where(eq(gamePlayers.gameId, session.gameId));
-  await addEvent(session.gameId, "match_started", host.id, null, "public", { headStartSeconds: parseRules(game.rulesJson).headStartSeconds });
+  await addEvent(session.gameId, "match_started", host.id, null, "public", { headStartSeconds: rules.headStartSeconds, extractionOpensAtSeconds: rules.extractionOpensAtSeconds, matchSeconds: rules.matchSeconds });
 }
 
 export async function pauseGame(session: GuestSession, paused: boolean) {
@@ -248,10 +250,10 @@ export async function tickGame(gameId: string) {
   }
   const players = await db.select().from(gamePlayers).where(eq(gamePlayers.gameId, game.id));
   if (
-    elapsed > 20 &&
+    elapsed > 180 &&
     players.some(player =>
       player.status === "active" &&
-      (!player.lastLocationAt || now.getTime() - player.lastLocationAt.getTime() > 20_000),
+      (!player.lastLocationAt || now.getTime() - player.lastLocationAt.getTime() > 180_000),
     )
   ) {
     await db.update(games).set({ status: "paused", pausedAt: now }).where(eq(games.id, game.id));
@@ -290,7 +292,7 @@ export async function tickGame(gameId: string) {
         await db.update(gamePlayers).set({ videoDueAt: new Date(now.getTime() + 20_000), videoUploadDeadlineAt: new Date(now.getTime() + 50_000) }).where(eq(gamePlayers.id, player.id));
       }
     }
-    const next = new Date(now.getTime() + pingIntervalSeconds(survivors.length) * 1000);
+    const next = new Date(now.getTime() + pingIntervalSeconds(survivors.length, rules.matchSeconds) * 1000);
     await db.update(games).set({ nextPingAt: next }).where(eq(games.id, game.id));
     await addEvent(game.id, "survivor_ping", null, null, "public", { survivorCount: survivors.length, nextPingAt: next.toISOString() });
   }
@@ -310,7 +312,7 @@ export async function tickGame(gameId: string) {
     await db.update(games).set({ currentRadius: nextRadius, stormPhase: "normal", stormPhaseEndsAt: null, lastCaptureAt: now }).where(eq(games.id, game.id));
     await addEvent(game.id, "storm_contracted", null, null, "public", { radius: nextRadius });
   }
-  if ((!game.lastItemSpawnAt || now.getTime() - game.lastItemSpawnAt.getTime() >= 60_000)) {
+  if (elapsed >= rules.powerupStartsAtSeconds && (!game.lastItemSpawnAt || now.getTime() - game.lastItemSpawnAt.getTime() >= rules.powerupIntervalSeconds * 1_000)) {
     const activeItems = await db.select().from(gameItems).where(and(eq(gameItems.gameId, game.id), eq(gameItems.status, "active"), gt(gameItems.expiresAt, now)));
     const points = await db.select().from(gamePoints).where(and(eq(gamePoints.gameId, game.id), eq(gamePoints.type, "powerup_candidate")));
     const effectiveRadius = effectiveStormRadius(game, now);
@@ -439,6 +441,11 @@ export async function resolveCapture(session: GuestSession, claimId: string, res
     await db.update(gamePlayers).set({ status: "turning", turnEndsAt: new Date(now.getTime() + DEFAULT_RULES.captureTurnSeconds * 1000), inventory: null, videoSkipArmed: false }).where(eq(gamePlayers.id, claim.targetPlayerId));
     await db.update(games).set({ lastCaptureAt: now }).where(eq(games.id, session.gameId));
     await addEvent(session.gameId, "capture_confirmed", claim.zombiePlayerId, claim.targetPlayerId, "public", { turnSeconds: DEFAULT_RULES.captureTurnSeconds });
+    const remainingSurvivors = await db.select({ id: gamePlayers.id }).from(gamePlayers).where(and(eq(gamePlayers.gameId, session.gameId), eq(gamePlayers.role, "survivor"), eq(gamePlayers.status, "active")));
+    if (!remainingSurvivors.length) {
+      await db.update(games).set({ status: "finished", winner: "zombies", finishedAt: now }).where(eq(games.id, session.gameId));
+      await addEvent(session.gameId, "match_finished", claim.zombiePlayerId, null, "public", { winner: "zombies", reason: "all_survivors_confirmed_captured" });
+    }
   } else {
     await addEvent(session.gameId, "capture_dismissed", player.id, claim.zombiePlayerId, "public", {});
   }
@@ -471,7 +478,7 @@ export async function gameSnapshot(session: GuestSession) {
   const visibleEvents = events.filter(event => event.visibility === "public" || (event.visibility === "host" && isHost) || (event.visibility === "target" && event.targetPlayerId === viewer.id) || (event.visibility === "zombies" && viewer.role === "zombie") || (event.visibility === "survivors" && viewer.role === "survivor"));
   const visibleMedia = media.filter(entry => isHost || entry.playerId === viewer.id || entry.targetPlayerId === viewer.id || (entry.visibility === "zombies" && viewer.role === "zombie") || (entry.visibility === "survivors" && viewer.role === "survivor")).map(entry => ({ ...entry, url: `/manus-storage/${entry.storageKey}` }));
   const visibleClaims = claims.filter(claim => isHost || claim.targetPlayerId === viewer.id || claim.zombiePlayerId === viewer.id);
-  const visibleItems = items.filter(item => item.faction === viewer.role).filter(item => item.expiresAt > now);
+  const visibleItems = items.filter(item => item.expiresAt > now);
   const rules = parseRules(game.rulesJson);
   const staleLocationSeconds = viewer.lastLocationAt ? Math.max(0, Math.floor((now.getTime() - viewer.lastLocationAt.getTime()) / 1000)) : null;
   const visiblePoints = game.status === "running"
