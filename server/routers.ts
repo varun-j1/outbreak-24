@@ -18,8 +18,8 @@ export const appRouter = router({
     }),
   }),
   game: router({
-    create: publicProcedure.input(z.object({ displayName: nameInput })).mutation(({ input }) => createGame(input.displayName)),
-    join: publicProcedure.input(z.object({ joinCode: z.string().trim().toUpperCase().length(6), displayName: nameInput })).mutation(({ input }) => joinGame(input.joinCode, input.displayName)),
+    create: publicProcedure.input(z.object({ displayName: nameInput, profileImageKey: z.string().max(256).optional() })).mutation(({ input }) => createGame(input.displayName, input.profileImageKey)),
+    join: publicProcedure.input(z.object({ joinCode: z.string().trim().toUpperCase().length(6), displayName: nameInput, profileImageKey: z.string().max(256).optional() })).mutation(({ input }) => joinGame(input.joinCode, input.displayName, input.profileImageKey)),
     rejoin: publicProcedure.input(z.object({ joinCode: z.string().trim().toUpperCase().length(6), recoveryCode: z.string().trim().toUpperCase().length(10) })).mutation(({ input }) => rejoinGame(input.joinCode, input.recoveryCode)),
     snapshot: publicProcedure.input(sessionInput).query(({ input }) => gameSnapshot(input)),
     saveSetup: publicProcedure.input(sessionInput.extend({

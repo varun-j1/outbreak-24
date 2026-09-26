@@ -3,8 +3,29 @@ import { createMediaEntry, getSessionPlayer } from "./db";
 import { storagePut } from "./storage";
 
 const maxBytes = 35 * 1024 * 1024;
+const maxProfileBytes = 3 * 1024 * 1024;
+
+function decodeDataUrl(dataUrl: unknown) {
+  const encoded = String(dataUrl).includes(",") ? String(dataUrl).split(",").pop()! : String(dataUrl);
+  return Buffer.from(encoded, "base64");
+}
 
 export function registerGameMediaRoutes(app: Express) {
+  app.post("/api/profile-image", async (req, res) => {
+    try {
+      const { dataUrl, mimeType } = req.body ?? {};
+      const allowedMimeTypes = ["image/jpeg", "image/png", "image/webp"];
+      if (!dataUrl || !allowedMimeTypes.includes(mimeType)) return res.status(400).json({ error: "Choose a JPG, PNG, or WebP image." });
+      const buffer = decodeDataUrl(dataUrl);
+      if (!buffer.length || buffer.length > maxProfileBytes) return res.status(413).json({ error: "Profile images must be smaller than 3 MB." });
+      const extension = mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
+      const stored = await storagePut(`outbreak/profiles/${crypto.randomUUID()}.${extension}`, buffer, mimeType);
+      return res.json({ storageKey: stored.key, url: stored.url });
+    } catch (error) {
+      return res.status(400).json({ error: error instanceof Error ? error.message : "Profile image upload failed." });
+    }
+  });
+
   app.post("/api/game-media", async (req, res) => {
     try {
       const { gameId, playerToken, targetPlayerId, kind, dataUrl, mimeType, durationSeconds } = req.body ?? {};
@@ -23,8 +44,7 @@ export function registerGameMediaRoutes(app: Express) {
       if (kind === "video" && player.videoUploadDeadlineAt && player.videoUploadDeadlineAt < new Date()) {
         return res.status(403).json({ error: "The upload grace period has ended; the host has been notified." });
       }
-      const encoded = String(dataUrl).includes(",") ? String(dataUrl).split(",").pop()! : String(dataUrl);
-      const buffer = Buffer.from(encoded, "base64");
+      const buffer = decodeDataUrl(dataUrl);
       if (!buffer.length || buffer.length > maxBytes) return res.status(413).json({ error: "Media must be smaller than 35 MB." });
       const extension = kind === "photo" ? "jpg" : "webm";
       const stored = await storagePut(`outbreak/${gameId}/${player.id}/${kind}-${Date.now()}.${extension}`, buffer, mimeType || (kind === "photo" ? "image/jpeg" : "video/webm"));

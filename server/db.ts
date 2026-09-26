@@ -69,7 +69,7 @@ async function makeJoinCode() {
 
 export type GuestSession = { gameId: string; playerToken: string };
 
-export async function createGame(displayName: string) {
+export async function createGame(displayName: string, profileImageKey?: string) {
   const db = await requireDb();
   const gameId = id();
   const hostPlayerId = id();
@@ -97,6 +97,7 @@ export async function createGame(displayName: string) {
     guestToken: playerToken,
     rejoinCode: hostRejoinCode,
     displayName,
+    profileImageKey: profileImageKey ?? null,
     isHost: true,
     role: "survivor",
   });
@@ -104,7 +105,7 @@ export async function createGame(displayName: string) {
   return { joinCode, gameId, playerToken, playerId: hostPlayerId, rejoinCode: hostRejoinCode };
 }
 
-export async function joinGame(joinCode: string, displayName: string) {
+export async function joinGame(joinCode: string, displayName: string, profileImageKey?: string) {
   const db = await requireDb();
   const game = (await db.select().from(games).where(eq(games.joinCode, joinCode)).limit(1))[0];
   if (!game) throw new Error("That join code does not exist.");
@@ -114,7 +115,7 @@ export async function joinGame(joinCode: string, displayName: string) {
   const playerId = id();
   const playerToken = token();
   const playerRejoinCode = rejoinCode();
-  await db.insert(gamePlayers).values({ id: playerId, gameId: game.id, guestToken: playerToken, rejoinCode: playerRejoinCode, displayName, role: "survivor" });
+  await db.insert(gamePlayers).values({ id: playerId, gameId: game.id, guestToken: playerToken, rejoinCode: playerRejoinCode, displayName, profileImageKey: profileImageKey ?? null, role: "survivor" });
   await addEvent(game.id, "player_joined", playerId, null, "public", { name: displayName });
   return { joinCode: game.joinCode, gameId: game.id, playerToken, playerId, rejoinCode: playerRejoinCode };
 }
@@ -462,7 +463,7 @@ export async function gameSnapshot(session: GuestSession) {
   const isHost = viewer.isHost;
   const canSeeLiveSurvivor = (target: typeof allPlayers[number]) => target.id === viewer.id || (viewer.role === "zombie" && (!!target.trailExposureUntil && target.trailExposureUntil > now || target.boundaryExposed));
   const visiblePlayers = allPlayers.map(target => {
-    const base = { id: target.id, name: target.displayName, role: target.role, status: target.status, isHost: target.isHost, isReady: target.isReady, exposureUntil: target.trailExposureUntil, boundaryExposed: target.boundaryExposed, lastLocationAt: target.lastLocationAt };
+    const base = { id: target.id, name: target.displayName, profileImageUrl: target.profileImageKey ? `/manus-storage/${target.profileImageKey}` : null, role: target.role, status: target.status, isHost: target.isHost, isReady: target.isReady, exposureUntil: target.trailExposureUntil, boundaryExposed: target.boundaryExposed, lastLocationAt: target.lastLocationAt };
     if (canSeeLiveSurvivor(target) || (viewer.role === "zombie" && target.role === "zombie")) return { ...base, lat: target.lastLat, lng: target.lastLng, positionKind: "live" as const };
     if (target.role === "survivor" && target.lastPingLat !== null && target.lastPingLng !== null) return { ...base, lat: target.lastPingLat, lng: target.lastPingLng, positionKind: "snapshot" as const };
     return { ...base, lat: null, lng: null, positionKind: "hidden" as const };

@@ -43,6 +43,7 @@ export const gamePlayers = mysqlTable("gamePlayers", {
   guestToken: varchar("guestToken", { length: 80 }).notNull(),
   rejoinCode: varchar("rejoinCode", { length: 12 }).notNull(),
   displayName: varchar("displayName", { length: 36 }).notNull(),
+  profileImageKey: varchar("profileImageKey", { length: 256 }),
   isHost: boolean("isHost").default(false).notNull(),
   role: mysqlEnum("role", ["survivor", "zombie", "spectator"]).default("survivor").notNull(),
   status: mysqlEnum("status", ["active", "turning", "escaped", "forfeited", "disconnected"]).default("active").notNull(),

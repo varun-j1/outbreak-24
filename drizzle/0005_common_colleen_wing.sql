@@ -1,0 +1,1 @@
+ALTER TABLE `gamePlayers` ADD `profileImageKey` varchar(256);
