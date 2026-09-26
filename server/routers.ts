@@ -3,7 +3,7 @@ import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
-import { assignZombie, collectItem, createGame, gameSnapshot, joinGame, pauseGame, rejoinGame, reportLocation, resolveCapture, setReady, startGame, updateSetup, useItem } from "./db";
+import { assignZombie, collectItem, createGame, gameSnapshot, joinGame, openBriefing, pauseGame, rejoinGame, reportLocation, resolveCapture, setReady, startGame, updateSetup, useItem } from "./db";
 
 const sessionInput = z.object({ gameId: z.string().min(1), playerToken: z.string().min(20) });
 const nameInput = z.string().trim().min(2, "Use at least two characters.").max(36, "Use 36 characters or fewer.");
@@ -32,6 +32,7 @@ export const appRouter = router({
     })).mutation(({ input }) => updateSetup(input, input)),
     setReady: publicProcedure.input(sessionInput.extend({ isReady: z.boolean() })).mutation(({ input }) => setReady(input, input.isReady)),
     assignZombie: publicProcedure.input(sessionInput.extend({ playerId: z.string(), isZombie: z.boolean() })).mutation(({ input }) => assignZombie(input, input.playerId, input.isZombie)),
+    openBriefing: publicProcedure.input(sessionInput).mutation(({ input }) => openBriefing(input)),
     start: publicProcedure.input(sessionInput).mutation(({ input }) => startGame(input)),
     pause: publicProcedure.input(sessionInput.extend({ paused: z.boolean() })).mutation(({ input }) => pauseGame(input, input.paused)),
     reportLocation: publicProcedure.input(sessionInput.extend({ lat: z.number().gte(-90).lte(90), lng: z.number().gte(-180).lte(180), accuracy: z.number().min(0).max(5_000) })).mutation(({ input }) => reportLocation(input, input)),

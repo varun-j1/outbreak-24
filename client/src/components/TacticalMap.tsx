@@ -1,6 +1,7 @@
-import { Crosshair, MapPinned, Rotate3D, Satellite, ZoomIn, ZoomOut } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { MapView } from "@/components/Map";
+import mapboxgl, { type GeoJSONSource, type Map as MapboxMap, type Marker } from "mapbox-gl";
+import "mapbox-gl/dist/mapbox-gl.css";
+import { Crosshair, MapPinned, ZoomIn, ZoomOut } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export type TacticalPoint = { id: string; lat: number; lng: number; label: string; type: "extraction" | "powerup_candidate"; isActive?: boolean };
 export type TacticalPlayer = { id: string; name: string; profileImageUrl?: string | null; role: "survivor" | "zombie" | "spectator"; status: string; lat: number | null; lng: number | null; positionKind: "live" | "snapshot" | "hidden"; isHost: boolean; boundaryExposed: boolean };
@@ -10,6 +11,7 @@ export type TacticalItem = { id: string; type: string; faction: string; lat: num
 type Props = {
   center: { lat: number; lng: number };
   radius: number;
+  minimumRadius?: number;
   points: TacticalPoint[];
   players: TacticalPlayer[];
   trails: TacticalTrail[];
@@ -20,197 +22,196 @@ type Props = {
   className?: string;
 };
 
-type MapOverlays = { circles: google.maps.Circle[]; lines: google.maps.Polyline[]; markers: Array<google.maps.marker.AdvancedMarkerElement | google.maps.Marker> };
+type MarkerRecord = { marker: Marker; signature: string };
 
-const wait = (milliseconds: number) => new Promise(resolve => window.setTimeout(resolve, milliseconds));
+const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined;
+const DEFAULT_CENTER = { lat: -34.92051, lng: 138.60456 };
+const markerColor = { survivor: "#22d6c6", zombie: "#ff455c", extraction: "#f5cb55", powerup_candidate: "#a885ff" };
 
-function avatarMarkup(player: TacticalPlayer, locationName: string, isSelf: boolean) {
-  const initial = player.name.slice(0, 1).toUpperCase();
-  const roleClass = player.role === "zombie" ? "infected" : "survivor";
-  const image = player.profileImageUrl
-    ? `<img src="${player.profileImageUrl}" alt="" />`
-    : `<span class="field-map__initial">${initial}</span>`;
-  return `<div class="field-map__ping field-map__ping--${roleClass} ${player.positionKind === "snapshot" ? "field-map__ping--snapshot" : ""}"><div class="field-map__avatar">${image}</div><div class="field-map__ping-copy"><strong>${isSelf ? "YOU" : player.name}</strong><span>${player.positionKind === "snapshot" ? "LAST PING" : "LIVE"} · near ${locationName}</span></div></div>`;
+function circleFeature(center: { lat: number; lng: number }, radiusMeters: number, steps = 72) {
+  const coordinates = Array.from({ length: steps + 1 }, (_, index) => {
+    const bearing = (index / steps) * Math.PI * 2;
+    const latitude = center.lat + (radiusMeters / 111_320) * Math.cos(bearing);
+    const longitude = center.lng + (radiusMeters / (111_320 * Math.cos((center.lat * Math.PI) / 180))) * Math.sin(bearing);
+    return [longitude, latitude];
+  });
+  return { type: "Feature" as const, properties: {}, geometry: { type: "Polygon" as const, coordinates: [coordinates] } };
 }
 
-function itemMarkup(item: TacticalItem) {
-  const team = item.faction === "zombie" ? "INFECTED" : "SURVIVORS";
-  const icon = item.faction === "zombie" ? "☣" : "✦";
-  return `<div class="field-map__pickup field-map__pickup--${item.faction}"><b>${icon}</b><span>${team}<small>${item.type.replaceAll("_", " ")}</small></span></div>`;
+function emptyCollection() {
+  return { type: "FeatureCollection" as const, features: [] as GeoJSON.Feature[] };
 }
 
-function placeName(results: google.maps.GeocoderResult[] | null | undefined) {
-  const result = results?.find(entry => entry.types.some(type => ["point_of_interest", "premise", "neighborhood", "sublocality", "route"].includes(type))) ?? results?.[0];
-  if (!result) return "your last location";
-  return result.address_components?.find(component => component.types.some(type => ["point_of_interest", "premise", "neighborhood", "sublocality", "route"].includes(type)))?.long_name ?? result.formatted_address.split(",")[0] ?? "your last location";
+function pointCollection(points: TacticalPoint[]) {
+  return {
+    type: "FeatureCollection" as const,
+    features: points.map(point => ({ type: "Feature" as const, properties: { id: point.id, label: point.label, type: point.type }, geometry: { type: "Point" as const, coordinates: [point.lng, point.lat] } })),
+  };
 }
 
-function makePositionKey(players: TacticalPlayer[]) {
-  return players.filter(player => player.lat !== null && player.lng !== null).map(player => `${player.id}:${player.lat!.toFixed(5)}:${player.lng!.toFixed(5)}:${player.positionKind}`).join("|");
+function trailCollection(trails: TacticalTrail[]) {
+  return {
+    type: "FeatureCollection" as const,
+    features: trails.map(trail => ({ type: "Feature" as const, properties: { id: trail.id }, geometry: { type: "LineString" as const, coordinates: [[trail.fromLng, trail.fromLat], [trail.toLng, trail.toLat]] } })),
+  };
 }
 
-function Native3DMap({ center, radius, points, players, items, currentPlayerId, labels, map3dRef, onUnavailable }: { center: Props["center"]; radius: number; points: TacticalPoint[]; players: TacticalPlayer[]; items: TacticalItem[]; currentPlayerId: string; labels: Record<string, string>; map3dRef: React.MutableRefObject<any>; onUnavailable: () => void }) {
+function makePinElement(kind: "self" | "snapshot" | "point" | "item", label: string, profileImageUrl?: string | null, role?: string) {
+  const element = document.createElement("div");
+  if (kind === "snapshot") {
+    element.className = `mapbox-field__ping ${role === "zombie" ? "mapbox-field__ping--zombie" : ""}`;
+    const portrait = profileImageUrl ? `<img src="${profileImageUrl}" alt="" />` : `<span>${label.slice(0, 1).toUpperCase()}</span>`;
+    element.innerHTML = `<div class="mapbox-field__portrait">${portrait}</div><div><b>${label.split(" · ")[0]}</b><small>${label.split(" · ").slice(1).join(" · ")}</small></div>`;
+  } else if (kind === "self") {
+    element.className = `mapbox-field__self ${role === "zombie" ? "mapbox-field__self--zombie" : ""}`;
+    element.innerHTML = profileImageUrl ? `<img src="${profileImageUrl}" alt="Your location" />` : `<span>${label.slice(0, 1).toUpperCase()}</span>`;
+  } else if (kind === "item") {
+    element.className = `mapbox-field__item mapbox-field__item--${role}`;
+    element.innerHTML = `<b>${role === "zombie" ? "☣" : "✦"}</b><span>${role === "zombie" ? "INFECTED" : "SURVIVOR"}<small>${label}</small></span>`;
+  } else {
+    element.className = `mapbox-field__point mapbox-field__point--${role}`;
+    element.textContent = `${role === "extraction" ? "EXIT" : "POWER"} · ${label}`;
+  }
+  return element;
+}
+
+function placeNameFromFeature(response: any) {
+  const properties = response?.features?.[0]?.properties ?? {};
+  return properties.name ?? response?.features?.[0]?.text ?? "field location";
+}
+
+export default function TacticalMap({ center, radius, minimumRadius, points, players, trails, items, currentPlayerId, currentLocation, onMapClick, className }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const mapInstanceRef = useRef<any>(null);
-  useEffect(() => {
-    if (!window.google?.maps) return;
-    let active = true;
-    void window.google.maps.importLibrary("maps3d").then((library: any) => {
-      if (!active || !containerRef.current) return;
-      const map = new library.Map3DElement({ center: { ...center, altitude: 0 }, range: Math.max(550, radius * 2.6), tilt: 67.5, heading: 28, mode: library.MapMode.HYBRID });
-      map.style.width = "100%";
-      map.style.height = "100%";
-      containerRef.current.replaceChildren(map);
-      mapInstanceRef.current = map;
-      map3dRef.current = map;
-    }).catch(() => onUnavailable());
-    return () => { active = false; map3dRef.current = null; containerRef.current?.replaceChildren(); };
-  }, []);
-  useEffect(() => {
-    const map = mapInstanceRef.current;
-    if (!map || !window.google?.maps) return;
-    void window.google.maps.importLibrary("maps3d").then((library: any) => {
-      map.center = { ...center, altitude: 0 };
-      map.range = Math.max(550, radius * 2.6);
-      map.tilt = 67.5;
-      map.heading = 28;
-      map.replaceChildren();
-      const Marker3DElement = library.Marker3DElement;
-      const addMarker = (position: { lat: number; lng: number }, label: string) => map.append(new Marker3DElement({ position: { ...position, altitude: 35 }, label }));
-      points.forEach(point => addMarker(point, `${point.type === "extraction" ? "EXIT" : "POWER"} · ${point.label}`));
-      items.forEach(item => addMarker(item, `${item.faction === "zombie" ? "INFECTED" : "SURVIVOR"} DROP · ${item.type.replaceAll("_", " ")}`));
-      players.filter(player => player.lat !== null && player.lng !== null).forEach(player => addMarker({ lat: player.lat!, lng: player.lng! }, `${player.id === currentPlayerId ? "YOU" : player.name} · near ${labels[player.id] ?? "field location"}`));
-    }).catch(() => undefined);
-  }, [center, radius, points, players, items, labels, currentPlayerId]);
-  return <div ref={containerRef} className="absolute inset-0 z-10" aria-label="Interactive Google 3D city map" />;
-}
-
-export default function TacticalMap({ center, radius, points, players, trails, items, currentPlayerId, currentLocation, onMapClick, className }: Props) {
-  const mapRef = useRef<google.maps.Map | null>(null);
-  const overlaysRef = useRef<MapOverlays>({ circles: [], lines: [], markers: [] });
+  const mapRef = useRef<MapboxMap | null>(null);
+  const markersRef = useRef<Map<string, MarkerRecord>>(new Map());
   const clickRef = useRef(onMapClick);
-  const map3dRef = useRef<any>(null);
-  const geocodeCacheRef = useRef(new Map<string, string>());
+  const placeCacheRef = useRef(new Map<string, string>());
+  const didFrameRef = useRef(false);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState("");
-  const [is3d, setIs3d] = useState(!onMapClick);
   const [labels, setLabels] = useState<Record<string, string>>({});
-  const lastCentreKey = useRef("");
-  const playerKey = makePositionKey(players);
 
+  const snapshotPlayers = useMemo(() => players.filter(player => player.positionKind === "snapshot" && player.lat !== null && player.lng !== null), [players]);
+  const selfPlayer = players.find(player => player.id === currentPlayerId);
   useEffect(() => { clickRef.current = onMapClick; }, [onMapClick]);
 
-  const clearOverlays = () => {
-    const overlays = overlaysRef.current;
-    overlays.circles.forEach(circle => circle.setMap(null));
-    overlays.lines.forEach(line => line.setMap(null));
-    overlays.markers.forEach(marker => { (marker as google.maps.marker.AdvancedMarkerElement).map = null; });
-    overlaysRef.current = { circles: [], lines: [], markers: [] };
-  };
+  const setSourceData = useCallback((sourceId: string, data: any) => {
+    const source = mapRef.current?.getSource(sourceId) as GeoJSONSource | undefined;
+    source?.setData(data);
+  }, []);
 
-  const createMarker = (map: google.maps.Map, position: google.maps.LatLngLiteral, content: HTMLElement, title: string) => {
-    const advanced = window.google?.maps?.marker?.AdvancedMarkerElement;
-    if (advanced) return new advanced({ map, position, content, title });
-    return new google.maps.Marker({ map, position, title, icon: { path: google.maps.SymbolPath.CIRCLE, fillColor: "#24e3cf", fillOpacity: 1, strokeColor: "#061014", strokeWeight: 2, scale: 9 } });
-  };
-
-  const rebuildOverlays = useCallback(() => {
+  const syncMarkers = useCallback(() => {
     const map = mapRef.current;
-    if (!map || !window.google?.maps) return;
-    clearOverlays();
-    const overlays = overlaysRef.current;
-    const zone = new google.maps.Circle({ map, center, radius, strokeColor: "#23e0cf", strokeOpacity: 0.95, strokeWeight: 3, fillColor: "#23e0cf", fillOpacity: 0.08, clickable: false });
-    overlays.circles.push(zone);
-    trails.forEach(trail => overlays.lines.push(new google.maps.Polyline({ map, path: [{ lat: trail.fromLat, lng: trail.fromLng }, { lat: trail.toLat, lng: trail.toLng }], strokeColor: "#ff455c", strokeOpacity: 0.72, strokeWeight: 9, geodesic: true })));
+    if (!map) return;
+    const next = new Map<string, { position: { lat: number; lng: number }; signature: string; element: HTMLElement }>();
     points.forEach(point => {
-      const marker = document.createElement("div");
-      marker.className = `field-map__point field-map__point--${point.type}`;
-      marker.textContent = point.type === "extraction" ? `EXIT · ${point.label}` : `POWER DROP · ${point.label}`;
-      overlays.markers.push(createMarker(map, point, marker, point.label));
+      const signature = `point:${point.type}:${point.label}:${point.lat.toFixed(6)}:${point.lng.toFixed(6)}`;
+      next.set(`point:${point.id}`, { position: point, signature, element: makePinElement("point", point.label, null, point.type) });
     });
     items.forEach(item => {
-      const marker = document.createElement("div");
-      marker.innerHTML = itemMarkup(item);
-      overlays.markers.push(createMarker(map, item, marker, `${item.faction} ${item.type}`));
+      const signature = `item:${item.faction}:${item.type}:${item.lat.toFixed(6)}:${item.lng.toFixed(6)}`;
+      next.set(`item:${item.id}`, { position: item, signature, element: makePinElement("item", item.type.replaceAll("_", " "), null, item.faction) });
     });
-    players.filter(player => player.lat !== null && player.lng !== null).forEach(player => {
-      const marker = document.createElement("div");
-      marker.innerHTML = avatarMarkup(player, labels[player.id] ?? "field location", player.id === currentPlayerId);
-      overlays.markers.push(createMarker(map, { lat: player.lat!, lng: player.lng! }, marker, `${player.name} near ${labels[player.id] ?? "field location"}`));
+    snapshotPlayers.forEach(player => {
+      const location = labels[player.id] ?? "field location";
+      const signature = `ping:${player.profileImageUrl ?? ""}:${player.name}:${location}:${player.lat!.toFixed(6)}:${player.lng!.toFixed(6)}:${player.role}`;
+      next.set(`ping:${player.id}`, { position: { lat: player.lat!, lng: player.lng! }, signature, element: makePinElement("snapshot", `${player.name} · LAST PING near ${location}`, player.profileImageUrl, player.role) });
     });
-  }, [center, radius, trails, points, items, players, labels, currentPlayerId]);
-
-  useEffect(() => { rebuildOverlays(); }, [rebuildOverlays]);
+    if (selfPlayer?.lat !== null && selfPlayer?.lat !== undefined && selfPlayer.lng !== null && selfPlayer.lng !== undefined) {
+      const signature = `self:${selfPlayer.profileImageUrl ?? ""}:${selfPlayer.name}:${selfPlayer.lat.toFixed(6)}:${selfPlayer.lng.toFixed(6)}:${selfPlayer.role}`;
+      next.set("self", { position: { lat: selfPlayer.lat, lng: selfPlayer.lng }, signature, element: makePinElement("self", selfPlayer.name, selfPlayer.profileImageUrl, selfPlayer.role) });
+    } else if (currentLocation) {
+      const signature = `self:local:${currentLocation.lat.toFixed(6)}:${currentLocation.lng.toFixed(6)}`;
+      next.set("self", { position: currentLocation, signature, element: makePinElement("self", "YOU", null, "survivor") });
+    }
+    markersRef.current.forEach((record, key) => { if (!next.has(key)) { record.marker.remove(); markersRef.current.delete(key); } });
+    next.forEach((definition, key) => {
+      const existing = markersRef.current.get(key);
+      if (!existing || existing.signature !== definition.signature) {
+        existing?.marker.remove();
+        const marker = new mapboxgl.Marker({ element: definition.element, anchor: key.startsWith("ping") ? "bottom" : "center" }).setLngLat([definition.position.lng, definition.position.lat]).addTo(map);
+        markersRef.current.set(key, { marker, signature: definition.signature });
+      } else {
+        existing.marker.setLngLat([definition.position.lng, definition.position.lat]);
+      }
+    });
+  }, [points, items, snapshotPlayers, selfPlayer, currentLocation, labels]);
 
   useEffect(() => {
-    if (!mapReady || !window.google?.maps) return;
-    const geocoder = new google.maps.Geocoder();
-    const positions = players.filter(player => player.lat !== null && player.lng !== null);
+    if (!MAPBOX_TOKEN) { setMapError("A Mapbox public token is required to load the field map."); return; }
+    if (!containerRef.current || mapRef.current) return;
+    mapboxgl.accessToken = MAPBOX_TOKEN;
+    const map = new mapboxgl.Map({
+      container: containerRef.current,
+      style: "mapbox://styles/mapbox/streets-v12",
+      center: [center.lng ?? DEFAULT_CENTER.lng, center.lat ?? DEFAULT_CENTER.lat],
+      zoom: radius > 1500 ? 13 : radius > 700 ? 14 : 15.5,
+      pitch: 0,
+      bearing: 0,
+      attributionControl: true,
+      dragRotate: false,
+      touchPitch: false,
+      cooperativeGestures: false,
+    });
+    map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "bottom-right");
+    map.on("load", () => {
+      map.addSource("zone", { type: "geojson", data: circleFeature(center, radius) });
+      map.addSource("minimum-zone", { type: "geojson", data: minimumRadius ? circleFeature(center, minimumRadius) : emptyCollection() });
+      map.addSource("trails", { type: "geojson", data: trailCollection([]) });
+      map.addLayer({ id: "zone-fill", type: "fill", source: "zone", paint: { "fill-color": "#23e0cf", "fill-opacity": 0.07 } });
+      map.addLayer({ id: "zone-outline", type: "line", source: "zone", paint: { "line-color": "#23e0cf", "line-width": 3, "line-opacity": 0.9 } });
+      map.addLayer({ id: "minimum-zone-outline", type: "line", source: "minimum-zone", paint: { "line-color": "#f5cb55", "line-width": 2, "line-opacity": 0.92, "line-dasharray": [2, 2] } });
+      map.addLayer({ id: "trails-line", type: "line", source: "trails", paint: { "line-color": "#ff455c", "line-width": 7, "line-opacity": 0.72 } });
+      map.on("click", event => clickRef.current?.({ lat: event.lngLat.lat, lng: event.lngLat.lng }));
+      mapRef.current = map;
+      setMapReady(true);
+      const longitudePadding = radius / (111_320 * Math.cos((center.lat * Math.PI) / 180));
+      const latitudePadding = radius / 111_320;
+      map.fitBounds([[center.lng - longitudePadding, center.lat - latitudePadding], [center.lng + longitudePadding, center.lat + latitudePadding]], { padding: 48, duration: 0, maxZoom: 16 });
+      didFrameRef.current = true;
+    });
+    map.on("error", event => { if (event.error) setMapError("Mapbox could not load map details. Check the token and permitted domain."); });
+    return () => { markersRef.current.forEach(record => record.marker.remove()); markersRef.current.clear(); map.remove(); mapRef.current = null; };
+  }, []);
+
+  useEffect(() => {
+    if (!mapReady) return;
+    setSourceData("zone", circleFeature(center, radius));
+    setSourceData("minimum-zone", minimumRadius ? circleFeature(center, minimumRadius) : emptyCollection());
+    setSourceData("trails", trailCollection(trails));
+  }, [mapReady, center, radius, minimumRadius, trails, setSourceData]);
+
+  useEffect(() => { if (mapReady) syncMarkers(); }, [mapReady, syncMarkers]);
+
+  useEffect(() => {
+    if (!snapshotPlayers.length || !MAPBOX_TOKEN) return;
     let cancelled = false;
-    void Promise.all(positions.map(async player => {
+    void Promise.all(snapshotPlayers.map(async player => {
       const key = `${player.lat!.toFixed(4)},${player.lng!.toFixed(4)}`;
-      if (geocodeCacheRef.current.has(key)) return [player.id, geocodeCacheRef.current.get(key)!] as const;
+      if (placeCacheRef.current.has(key)) return [player.id, placeCacheRef.current.get(key)!] as const;
       try {
-        const response = await geocoder.geocode({ location: { lat: player.lat!, lng: player.lng! } });
-        const label = placeName(response.results);
-        geocodeCacheRef.current.set(key, label);
+        const response = await fetch(`https://api.mapbox.com/search/geocode/v6/reverse?longitude=${player.lng}&latitude=${player.lat}&types=street,neighborhood,place&access_token=${encodeURIComponent(MAPBOX_TOKEN)}`);
+        const result = await response.json();
+        const label = placeNameFromFeature(result);
+        placeCacheRef.current.set(key, label);
         return [player.id, label] as const;
       } catch { return [player.id, "field location"] as const; }
-    })).then(entries => {
-      if (!cancelled) setLabels(current => ({ ...current, ...Object.fromEntries(entries) }));
-    });
+    })).then(entries => { if (!cancelled) setLabels(current => ({ ...current, ...Object.fromEntries(entries) })); });
     return () => { cancelled = true; };
-  }, [mapReady, playerKey]);
-
-  const onMapReady = useCallback((map: google.maps.Map) => {
-    mapRef.current = map;
-    map.setTilt(62);
-    map.setHeading(22);
-    map.setZoom(16);
-    map.addListener("click", (event: google.maps.MapMouseEvent) => { if (event.latLng) clickRef.current?.({ lat: event.latLng.lat(), lng: event.latLng.lng() }); });
-    setMapReady(true);
-    void wait(150).then(rebuildOverlays);
-  }, [rebuildOverlays]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !mapReady) return;
-    const key = `${center.lat.toFixed(5)},${center.lng.toFixed(5)},${radius}`;
-    if (key !== lastCentreKey.current) {
-      map.panTo(center);
-      if (!lastCentreKey.current) map.setZoom(radius > 1500 ? 13 : radius > 700 ? 14 : 16);
-      lastCentreKey.current = key;
-    }
-  }, [center, radius, mapReady]);
+  }, [snapshotPlayers]);
 
   const recenter = () => {
-    if (is3d && map3dRef.current) {
-      map3dRef.current.center = { ...(currentLocation ?? center), altitude: 0 };
-      map3dRef.current.range = currentLocation ? 500 : Math.max(550, radius * 2.4);
-      return;
-    }
     const map = mapRef.current;
     if (!map) return;
-    map.panTo(currentLocation ?? center);
-    map.setZoom(currentLocation ? 17 : 16);
-    if (currentLocation) map.setTilt(62);
+    map.easeTo({ center: [currentLocation?.lng ?? center.lng, currentLocation?.lat ?? center.lat], zoom: currentLocation ? 17 : (radius > 1500 ? 13 : 15.5), duration: 450 });
   };
-  const toggle3d = () => {
-    if (onMapClick) return;
-    const map = mapRef.current;
-    if (!map) return;
-    const next = !is3d;
-    setIs3d(next);
-    map?.setTilt(next ? 62 : 0);
-    map?.setHeading(next ? 22 : 0);
-  };
+  const zoom = (delta: number) => mapRef.current?.easeTo({ zoom: (mapRef.current.getZoom() ?? 15) + delta, duration: 180 });
 
-  return <div className={`field-map relative min-h-[500px] overflow-hidden rounded-2xl border border-white/10 bg-[#0a151a] ${className ?? ""}`}>
-    <MapView className="absolute inset-0 !h-full" initialCenter={center} initialZoom={16} onMapReady={onMapReady} onLoadError={error => setMapError(error.message)} />
-    {is3d && !onMapClick && mapReady && <Native3DMap center={center} radius={radius} points={points} players={players} items={items} currentPlayerId={currentPlayerId} labels={labels} map3dRef={map3dRef} onUnavailable={() => { setIs3d(false); setMapError("Native 3D is unavailable with this maps configuration. Switched to the interactive 2D tactical map."); }} />}
-    <div className="pointer-events-none absolute inset-x-4 top-4 z-20 flex items-start justify-between gap-3"><div className="rounded-xl border border-teal-300/30 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.12em] text-teal-100 shadow-lg"><span className="block text-[9px] text-slate-400">FIELD MAP</span>{is3d ? "3D HYBRID MODE" : "2D HYBRID MODE"}</div>{mapError && <div className="max-w-xs rounded-xl border border-[#ff455c]/50 bg-[#071116]/95 px-3 py-2 text-xs font-bold text-[#ffb2bd]">{mapError}</div>}</div>
-    {is3d && !onMapClick && players.filter(player => player.lat !== null && player.lng !== null).length > 0 && <div className="field-map__ping-dock absolute bottom-4 left-4 z-20 flex max-w-[72%] gap-2 overflow-x-auto pb-1">{players.filter(player => player.lat !== null && player.lng !== null).map(player => <div key={player.id} className={`field-map__ping-card ${player.role === "zombie" ? "field-map__ping-card--zombie" : ""}`}><div className="field-map__ping-card-avatar">{player.profileImageUrl ? <img src={player.profileImageUrl} alt={`${player.name} profile ping`} /> : player.name.slice(0, 1).toUpperCase()}</div><div><b>{player.id === currentPlayerId ? "YOU" : player.name}</b><span>{player.positionKind === "snapshot" ? "LAST PING" : "LIVE"} · near {labels[player.id] ?? "field location"}</span></div></div>)}</div>}
-    <div className="absolute bottom-4 right-4 z-20 grid gap-2"><button onClick={() => { if (is3d && map3dRef.current) map3dRef.current.range = Math.max(120, (map3dRef.current.range ?? 900) * 0.72); else mapRef.current?.setZoom((mapRef.current.getZoom() ?? 16) + 1); }} className="field-map__control" aria-label="Zoom in"><ZoomIn size={19} /></button><button onClick={() => { if (is3d && map3dRef.current) map3dRef.current.range = Math.min(15_000, (map3dRef.current.range ?? 900) * 1.38); else mapRef.current?.setZoom((mapRef.current.getZoom() ?? 16) - 1); }} className="field-map__control" aria-label="Zoom out"><ZoomOut size={19} /></button>{!onMapClick && <button onClick={toggle3d} className={`field-map__control ${is3d ? "field-map__control--active" : ""}`} aria-label="Toggle 3D map"><Rotate3D size={19} /></button>}<button onClick={recenter} className="field-map__control" aria-label="Recenter map"><Crosshair size={19} /></button></div>
-    {!mapReady && <div className="absolute inset-0 z-30 grid place-items-center bg-[#071116]/85 text-center"><MapPinned className="mx-auto mb-3 animate-pulse text-teal-200" /><div className="text-xs font-black tracking-[0.16em] text-teal-100">LOADING FIELD MAP</div></div>}
+  return <div className={`field-map mapbox-field relative min-h-[500px] overflow-hidden rounded-2xl border border-white/10 bg-[#0a151a] ${className ?? ""}`}>
+    <div ref={containerRef} className="absolute inset-0" aria-label="Interactive two-dimensional field map" />
+    <div className="pointer-events-none absolute inset-x-4 top-4 z-10 flex items-start justify-between gap-3"><div className="rounded-xl border border-teal-300/30 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.12em] text-teal-100 shadow-lg"><span className="block text-[9px] text-slate-400">FIELD MAP</span>2D STREET DETAIL</div>{mapError && <div className="max-w-xs rounded-xl border border-[#ff455c]/50 bg-[#071116]/95 px-3 py-2 text-xs font-bold text-[#ffb2bd]">{mapError}</div>}</div>
+    {minimumRadius && onMapClick && <div className="pointer-events-none absolute bottom-4 left-4 z-10 rounded-xl border border-[#f5cb55]/40 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.1em] text-[#f9e29a]">DASHED RING · MINIMUM ZONE {Math.round(minimumRadius)} M</div>}
+    <div className="absolute bottom-4 right-4 z-10 grid gap-2"><button onClick={() => zoom(1)} className="field-map__control" aria-label="Zoom in"><ZoomIn size={19} /></button><button onClick={() => zoom(-1)} className="field-map__control" aria-label="Zoom out"><ZoomOut size={19} /></button><button onClick={recenter} className="field-map__control" aria-label="Recenter map"><Crosshair size={19} /></button></div>
+    {!mapReady && <div className="absolute inset-0 z-20 grid place-items-center bg-[#071116]/85 text-center"><MapPinned className="mx-auto mb-3 animate-pulse text-teal-200" /><div className="text-xs font-black tracking-[0.16em] text-teal-100">LOADING FIELD MAP</div></div>}
   </div>;
 }

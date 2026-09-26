@@ -36,6 +36,7 @@ export function registerGameMediaRoutes(app: Express) {
       if (kind === "photo" && player.role !== "zombie") return res.status(403).json({ error: "Only zombies can submit a capture photo." });
       if (kind === "photo" && !targetPlayerId) return res.status(400).json({ error: "Select a survivor before submitting a capture." });
       if (kind === "video" && player.role !== "survivor") return res.status(403).json({ error: "Only survivors can submit a field video." });
+      if (kind === "video" && (!Number.isFinite(durationSeconds) || Number(durationSeconds) < 1 || Number(durationSeconds) > 3)) return res.status(400).json({ error: "Field videos must be a compact 3-second recording." });
       const buffer = decodeDataUrl(dataUrl);
       if (!buffer.length || buffer.length > maxBytes) return res.status(413).json({ error: "Media must be smaller than 35 MB." });
       const extension = kind === "photo" ? "jpg" : "webm";
