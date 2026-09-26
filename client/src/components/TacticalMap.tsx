@@ -1,6 +1,6 @@
 import L, { type Circle, type LayerGroup, type Map as LeafletMap, type Marker, type Polyline } from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { Crosshair, MapPinned, ZoomIn, ZoomOut } from "lucide-react";
+import { Crosshair, MapPinned, Navigation, ZoomIn, ZoomOut } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export type TacticalPoint = { id: string; lat: number; lng: number; label: string; type: "extraction" | "powerup_candidate"; isActive?: boolean };
@@ -19,6 +19,7 @@ type Props = {
   currentPlayerId: string;
   currentLocation?: { lat: number; lng: number } | null;
   onMapClick?: (position: { lat: number; lng: number }) => void;
+  setupFocus?: boolean;
   className?: string;
 };
 
@@ -59,7 +60,15 @@ function placeNameFromFeature(response: any) {
   return properties.name ?? response?.features?.[0]?.text ?? "field location";
 }
 
-export default function TacticalMap({ center, radius, minimumRadius, points, players, trails, items, currentPlayerId, currentLocation, onMapClick, className }: Props) {
+function bearingDegrees(from: { lat: number; lng: number }, to: { lat: number; lng: number }) {
+  const radians = (value: number) => (value * Math.PI) / 180;
+  const longitude = radians(to.lng - from.lng);
+  const y = Math.sin(longitude) * Math.cos(radians(to.lat));
+  const x = Math.cos(radians(from.lat)) * Math.sin(radians(to.lat)) - Math.sin(radians(from.lat)) * Math.cos(radians(to.lat)) * Math.cos(longitude);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+export default function TacticalMap({ center, radius, minimumRadius, points, players, trails, items, currentPlayerId, currentLocation, onMapClick, setupFocus = false, className }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const pointLayerRef = useRef<LayerGroup | null>(null);
@@ -70,6 +79,7 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
   const clickRef = useRef(onMapClick);
   const placeCacheRef = useRef(new Map<string, string>());
   const initialBoundsRef = useRef(false);
+  const setupFocusRef = useRef(false);
   const centerRef = useRef<string>("");
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState("");
@@ -77,6 +87,9 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
 
   const snapshotPlayers = useMemo(() => players.filter(player => player.positionKind === "snapshot" && player.lat !== null && player.lng !== null), [players]);
   const selfPlayer = players.find(player => player.id === currentPlayerId);
+  const ownPosition = selfPlayer?.lat !== null && selfPlayer?.lat !== undefined && selfPlayer.lng !== null && selfPlayer.lng !== undefined ? { lat: selfPlayer.lat, lng: selfPlayer.lng } : currentLocation;
+  const directionTarget = snapshotPlayers[0];
+  const directionBearing = ownPosition && directionTarget?.lat !== null && directionTarget?.lat !== undefined && directionTarget.lng !== null && directionTarget.lng !== undefined ? bearingDegrees(ownPosition, { lat: directionTarget.lat, lng: directionTarget.lng }) : null;
   const fallbackImage = useMemo(() => MAPBOX_TOKEN ? `https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/${center.lng},${center.lat},15/1280x800?access_token=${encodeURIComponent(MAPBOX_TOKEN)}` : "", [center.lat, center.lng]);
   useEffect(() => { clickRef.current = onMapClick; }, [onMapClick]);
 
@@ -116,6 +129,16 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
     }
     centerRef.current = centerKey;
   }, [center, radius, minimumRadius, mapReady]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map) return;
+    if (!setupFocus) { setupFocusRef.current = false; return; }
+    if (!setupFocusRef.current) {
+      map.setView([center.lat, center.lng], Math.max(17, map.getZoom()), { animate: true });
+      setupFocusRef.current = true;
+    }
+  }, [setupFocus, mapReady, center]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -186,6 +209,7 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
     {fallbackImage && <img src={fallbackImage} className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover" alt="Mapbox street map fallback" onError={() => setMapError("Mapbox street imagery could not be reached. Check the network and token domain settings.")} />}
     <div ref={containerRef} className="absolute inset-0 z-[1]" aria-label="Interactive two-dimensional field map" />
     <div className="pointer-events-none absolute inset-x-4 top-4 z-10 flex items-start justify-between gap-3"><div className="rounded-xl border border-teal-300/30 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.12em] text-teal-100 shadow-lg"><span className="block text-[9px] text-slate-400">FIELD MAP</span>2D STREET DETAIL</div>{mapError && <div className="max-w-xs rounded-xl border border-amber-300/50 bg-[#071116]/95 px-3 py-2 text-xs font-bold text-amber-100">{mapError}</div>}</div>
+    {directionBearing !== null && <div className="pointer-events-none absolute right-4 top-16 z-10 flex items-center gap-2 rounded-xl border border-[#ff455c]/35 bg-[#071116]/92 px-2.5 py-2 text-[10px] font-black tracking-[.08em] text-[#ffb0ba]"><Navigation size={20} className="text-[#ff455c]" style={{ transform: `rotate(${directionBearing}deg)` }} fill="currentColor" /><span>LAST PING<br />{directionTarget.name.toUpperCase()}</span></div>}
     {minimumRadius && onMapClick && <div className="pointer-events-none absolute bottom-4 left-4 z-10 rounded-xl border border-[#f5cb55]/40 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.1em] text-[#f9e29a]">DASHED RING · MINIMUM ZONE {Math.round(minimumRadius)} M</div>}
     <div className="absolute bottom-4 right-4 z-20 grid gap-2"><button onClick={() => zoom(1)} className="field-map__control" aria-label="Zoom in"><ZoomIn size={19} /></button><button onClick={() => zoom(-1)} className="field-map__control" aria-label="Zoom out"><ZoomOut size={19} /></button><button onClick={recenter} className="field-map__control" aria-label="Recenter map"><Crosshair size={19} /></button></div>
     {!mapReady && <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center bg-[#071116]/45 text-center"><MapPinned className="mx-auto mb-3 animate-pulse text-teal-200" /><div className="text-xs font-black tracking-[0.16em] text-teal-100">LOADING FIELD MAP</div></div>}

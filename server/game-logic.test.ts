@@ -33,6 +33,8 @@ describe("game rule utilities", () => {
     expect(short.powerupStartsAtSeconds).toBeLessThan(short.extractionOpensAtSeconds);
     expect(long.extractionOpensAtSeconds).toBeGreaterThan(short.extractionOpensAtSeconds);
     expect(long.powerupIntervalSeconds).toBeGreaterThanOrEqual(short.powerupIntervalSeconds);
+    expect(short.stormStartsAtSeconds).toBe(300);
+    expect(long.stormStartsAtSeconds).toBe(300);
   });
 
   it("contracts the zone continuously during the announced shrink", () => {

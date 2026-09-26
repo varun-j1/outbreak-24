@@ -5,6 +5,7 @@ export const DEFAULT_RULES = {
   extractionHoldSeconds: 10,
   powerupStartsAtSeconds: 75,
   powerupIntervalSeconds: 60,
+  stormStartsAtSeconds: 5 * 60,
   trailLifetimeSeconds: 100,
   trailExitExposureSeconds: 15,
   trailWidthMeters: 14,

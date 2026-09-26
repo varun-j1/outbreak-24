@@ -279,7 +279,8 @@ export async function tickGame(gameId: string) {
     await addEvent(game.id, "player_turned", player.id, null, "public", { name: player.displayName });
   }
   const survivors = players.filter(player => player.role === "survivor" && player.status === "active");
-  if (!survivors.length) {
+  const remainingSurvivors = players.filter(player => player.role === "survivor" && (player.status === "active" || player.status === "turning"));
+  if (!remainingSurvivors.length) {
     await db.update(games).set({ status: "finished", winner: "zombies", finishedAt: now }).where(eq(games.id, game.id));
     await addEvent(game.id, "match_finished", null, null, "public", { winner: "zombies", reason: "no_survivors" });
     return;
@@ -297,7 +298,7 @@ export async function tickGame(gameId: string) {
   if (game.nextPingAt && game.nextPingAt <= now) {
     for (const player of survivors) {
       if (player.lastLat !== null && player.lastLng !== null) {
-        await db.update(gamePlayers).set({ lastPingLat: player.lastLat, lastPingLng: player.lastLng, lastPingAt: now, lastPingExpiresAt: new Date(now.getTime() + 24_000) }).where(eq(gamePlayers.id, player.id));
+        await db.update(gamePlayers).set({ lastPingLat: player.lastLat, lastPingLng: player.lastLng, lastPingAt: now, lastPingExpiresAt: new Date(now.getTime() + 35_000) }).where(eq(gamePlayers.id, player.id));
       }
       if (player.videoSkipArmed) {
         await db.update(gamePlayers).set({ videoSkipArmed: false }).where(eq(gamePlayers.id, player.id));
@@ -311,14 +312,24 @@ export async function tickGame(gameId: string) {
     await addEvent(game.id, "survivor_ping", null, null, "public", { survivorCount: survivors.length, nextPingAt: next.toISOString() });
   }
   for (const player of players.filter(player => player.videoUploadDeadlineAt && player.videoUploadDeadlineAt <= now)) {
-    await db.update(gamePlayers).set({ videoDueAt: null, videoUploadDeadlineAt: null, videoExposureUntil: new Date(now.getTime() + 20_000) }).where(eq(gamePlayers.id, player.id));
-    await addEvent(game.id, "video_missing", player.id, null, "public", { name: player.displayName, exposureSeconds: 20 });
+    const canPing = player.lastLat !== null && player.lastLng !== null;
+    await db.update(gamePlayers).set({
+      videoDueAt: null,
+      videoUploadDeadlineAt: null,
+      videoExposureUntil: null,
+      lastPingLat: canPing ? player.lastLat : player.lastPingLat,
+      lastPingLng: canPing ? player.lastLng : player.lastPingLng,
+      lastPingAt: canPing ? now : player.lastPingAt,
+      lastPingExpiresAt: canPing ? new Date(now.getTime() + 30_000) : player.lastPingExpiresAt,
+    }).where(eq(gamePlayers.id, player.id));
+    await addEvent(game.id, "video_missed_ping", player.id, null, "zombies", { name: player.displayName, pingSeconds: 30, lat: player.lastLat, lng: player.lastLng });
   }
   for (const player of players.filter(player => player.videoExposureUntil && player.videoExposureUntil <= now)) {
     await db.update(gamePlayers).set({ videoExposureUntil: null }).where(eq(gamePlayers.id, player.id));
   }
   const secondsSinceCapture = game.lastCaptureAt ? (now.getTime() - game.lastCaptureAt.getTime()) / 1000 : 0;
-  if (game.stormPhase === "normal" && secondsSinceCapture >= 120 && game.currentRadius > game.minimumRadius) {
+  // The red-zone pressure starts only after five full minutes of play.
+  if (elapsed >= rules.stormStartsAtSeconds && game.stormPhase === "normal" && secondsSinceCapture >= 120 && game.currentRadius > game.minimumRadius) {
     await db.update(games).set({ stormPhase: "warning", stormPhaseEndsAt: new Date(now.getTime() + 30_000) }).where(eq(games.id, game.id));
     await addEvent(game.id, "storm_warning", null, null, "public", { seconds: 30 });
   } else if (game.stormPhase === "warning" && game.stormPhaseEndsAt && game.stormPhaseEndsAt <= now) {
@@ -459,15 +470,15 @@ export async function resolveCapture(session: GuestSession, claimId: string, res
   }
   await db.update(gameCaptureClaims).set({ status: "resolved", resolution: capture ? "capture" : "dismissed", resolvedAt: now }).where(eq(gameCaptureClaims.id, claim.id));
   if (capture) {
-    const activeSurvivors = await db.select({ id: gamePlayers.id }).from(gamePlayers).where(and(eq(gamePlayers.gameId, session.gameId), eq(gamePlayers.role, "survivor"), eq(gamePlayers.status, "active")));
-    const isFinalSurvivor = activeSurvivors.length === 1 && activeSurvivors[0]?.id === claim.targetPlayerId;
-    await db.update(gamePlayers).set({ status: isFinalSurvivor ? "forfeited" : "turning", turnEndsAt: isFinalSurvivor ? null : new Date(now.getTime() + DEFAULT_RULES.captureTurnSeconds * 1000), inventory: null, videoSkipArmed: false }).where(eq(gamePlayers.id, claim.targetPlayerId));
+    await db.update(gamePlayers).set({
+      role: "survivor",
+      status: "turning",
+      turnEndsAt: new Date(now.getTime() + DEFAULT_RULES.captureTurnSeconds * 1000),
+      inventory: null,
+      videoSkipArmed: false,
+    }).where(eq(gamePlayers.id, claim.targetPlayerId));
     await db.update(games).set({ lastCaptureAt: now }).where(eq(games.id, session.gameId));
     await addEvent(session.gameId, "capture_confirmed", claim.zombiePlayerId, claim.targetPlayerId, "public", { turnSeconds: DEFAULT_RULES.captureTurnSeconds });
-    if (isFinalSurvivor) {
-      await db.update(games).set({ status: "finished", winner: "zombies", finishedAt: now }).where(eq(games.id, session.gameId));
-      await addEvent(session.gameId, "match_finished", claim.zombiePlayerId, null, "public", { winner: "zombies", reason: "all_survivors_confirmed_captured" });
-    }
   } else {
     await addEvent(session.gameId, "capture_dismissed", player.id, claim.zombiePlayerId, "public", {});
   }
@@ -491,7 +502,7 @@ export async function gameSnapshot(session: GuestSession) {
   ]);
   const now = new Date();
   const isHost = viewer.isHost;
-  const canSeeLiveSurvivor = (target: typeof allPlayers[number]) => target.id === viewer.id || (viewer.role === "zombie" && ((!!target.trailExposureUntil && target.trailExposureUntil > now) || (!!target.videoExposureUntil && target.videoExposureUntil > now) || target.boundaryExposed));
+  const canSeeLiveSurvivor = (target: typeof allPlayers[number]) => target.id === viewer.id || (viewer.role === "zombie" && ((!!target.trailExposureUntil && target.trailExposureUntil > now) || target.boundaryExposed));
   const visiblePlayers = allPlayers.map(target => {
     const base = { id: target.id, name: target.displayName, profileImageUrl: target.profileImageKey ? `/manus-storage/${target.profileImageKey}` : null, role: target.role, status: target.status, isHost: target.isHost, isReady: target.isReady, exposureUntil: target.videoExposureUntil && target.videoExposureUntil > now ? target.videoExposureUntil : target.trailExposureUntil, boundaryExposed: target.boundaryExposed, lastLocationAt: target.lastLocationAt };
     if (canSeeLiveSurvivor(target) || (viewer.role === "zombie" && target.role === "zombie")) return { ...base, lat: target.lastLat, lng: target.lastLng, positionKind: "live" as const };
@@ -531,7 +542,8 @@ export async function createMediaEntry(input: { gameId: string; playerId: string
     await addEvent(input.gameId, "capture_requested", input.playerId, input.targetPlayerId, "target", { mediaId });
   } else {
     await db.update(gamePlayers).set({ videoDueAt: null, videoUploadDeadlineAt: null }).where(eq(gamePlayers.id, input.playerId));
-    await addEvent(input.gameId, "surroundings_video", input.playerId, null, "zombies", { mediaId });
+    const player = (await db.select({ name: gamePlayers.displayName, lat: gamePlayers.lastLat, lng: gamePlayers.lastLng }).from(gamePlayers).where(eq(gamePlayers.id, input.playerId)).limit(1))[0];
+    await addEvent(input.gameId, "surroundings_video", input.playerId, null, "zombies", { mediaId, name: player?.name ?? "Survivor", lat: player?.lat ?? null, lng: player?.lng ?? null });
   }
   return mediaId;
 }
