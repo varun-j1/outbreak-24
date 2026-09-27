@@ -5,6 +5,7 @@ export const DEFAULT_RULES = {
   extractionHoldSeconds: 10,
   powerupStartsAtSeconds: 75,
   powerupIntervalSeconds: 60,
+  fixedPingIntervalSeconds: 0,
   stormStartsAtSeconds: 5 * 60,
   trailLifetimeSeconds: 100,
   trailExitExposureSeconds: 15,
@@ -24,7 +25,7 @@ const toRadians = (value: number) => (value * Math.PI) / 180;
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 /** Host match length drives the extraction window, item cadence, and ping frequency. */
-export function deriveRules(matchMinutes: number): GameRules {
+export function deriveRules(matchMinutes: number, fixedPingIntervalMinutes = 0): GameRules {
   const matchSeconds = Math.round(clamp(matchMinutes, 6, 45) * 60);
   const extractionWindow = clamp(Math.round(matchSeconds * 0.18), 75, 180);
   return {
@@ -33,6 +34,7 @@ export function deriveRules(matchMinutes: number): GameRules {
     extractionOpensAtSeconds: matchSeconds - extractionWindow,
     powerupStartsAtSeconds: clamp(Math.round(matchSeconds * 0.14), 45, 120),
     powerupIntervalSeconds: clamp(Math.round(matchSeconds / 10), 35, 75),
+    fixedPingIntervalSeconds: fixedPingIntervalMinutes > 0 ? Math.round(clamp(fixedPingIntervalMinutes, 1, 10) * 60) : 0,
   };
 }
 
@@ -74,10 +76,14 @@ export function pingIntervalSeconds(survivorCount: number, matchSecondsOrRandom?
   return Math.round(base * (0.88 + random() * 0.24));
 }
 
+export function scheduledPingIntervalSeconds(rules: GameRules, survivorCount: number, random = Math.random): number {
+  return rules.fixedPingIntervalSeconds > 0 ? rules.fixedPingIntervalSeconds : pingIntervalSeconds(survivorCount, rules.matchSeconds, random);
+}
+
 export function parseRules(input?: string | null): GameRules {
   try {
     const parsed = input ? JSON.parse(input) : {};
-    const derived = deriveRules((parsed.matchSeconds ?? DEFAULT_RULES.matchSeconds) / 60);
+    const derived = deriveRules((parsed.matchSeconds ?? DEFAULT_RULES.matchSeconds) / 60, (parsed.fixedPingIntervalSeconds ?? 0) / 60);
     return { ...derived, ...parsed };
   } catch { return DEFAULT_RULES; }
 }
@@ -96,4 +102,29 @@ export function effectiveStormRadius(game: { currentRadius: number; minimumRadiu
 
 export function markerPositionWithinBounds(center: Coordinate, point: Coordinate, radiusMeters: number, paddingMeters = 0): boolean {
   return metersBetween(center, point) <= Math.max(0, radiusMeters - paddingMeters);
+}
+
+/** Local meter offsets for the short outdoor areas supported by the game. */
+export function localOffsetMeters(center: Coordinate, point: Coordinate) {
+  return {
+    x: (point.lng - center.lng) * 111_320 * Math.cos(toRadians(center.lat)),
+    y: (point.lat - center.lat) * 111_320,
+  };
+}
+
+/**
+ * Tests a point against the field's rounded-square boundary. `halfWidthMeters`
+ * is intentionally stored in the legacy radius fields to avoid a schema migration.
+ */
+export function roundedSquarePositionWithinBounds(center: Coordinate, point: Coordinate, halfWidthMeters: number, paddingMeters = 0): boolean {
+  const halfWidth = Math.max(0, halfWidthMeters - paddingMeters);
+  const { x, y } = localOffsetMeters(center, point);
+  const horizontal = Math.abs(x);
+  const vertical = Math.abs(y);
+  if (horizontal > halfWidth || vertical > halfWidth) return false;
+
+  const cornerRadius = Math.min(Math.max(12, halfWidth * 0.18), halfWidth * 0.42);
+  const straightEdge = halfWidth - cornerRadius;
+  if (horizontal <= straightEdge || vertical <= straightEdge) return true;
+  return (horizontal - straightEdge) ** 2 + (vertical - straightEdge) ** 2 <= cornerRadius ** 2;
 }

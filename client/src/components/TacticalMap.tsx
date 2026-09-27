@@ -1,6 +1,6 @@
-import L, { type Circle, type LayerGroup, type Map as LeafletMap, type Marker, type Polyline } from "leaflet";
+import L, { type LayerGroup, type Map as LeafletMap, type Marker, type Polygon } from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { Crosshair, MapPinned, Navigation, ZoomIn, ZoomOut } from "lucide-react";
+import { Crosshair, Footprints, MapPinned, Navigation, Route as RouteIcon, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export type TacticalPoint = { id: string; lat: number; lng: number; label: string; type: "extraction" | "powerup_candidate"; isActive?: boolean };
@@ -8,8 +8,9 @@ export type TacticalPlayer = { id: string; name: string; profileImageUrl?: strin
 export type TacticalTrail = { id: string; fromLat: number; fromLng: number; toLat: number; toLng: number };
 export type TacticalItem = { id: string; type: string; faction: string; lat: number; lng: number };
 
+type Coordinate = { lat: number; lng: number };
 type Props = {
-  center: { lat: number; lng: number };
+  center: Coordinate;
   radius: number;
   minimumRadius?: number;
   points: TacticalPoint[];
@@ -17,13 +18,13 @@ type Props = {
   trails: TacticalTrail[];
   items: TacticalItem[];
   currentPlayerId: string;
-  currentLocation?: { lat: number; lng: number } | null;
-  onMapClick?: (position: { lat: number; lng: number }) => void;
+  currentLocation?: Coordinate | null;
+  onMapClick?: (position: Coordinate) => void;
   setupFocus?: boolean;
   className?: string;
 };
-
 type MarkerRecord = { marker: Marker; signature: string };
+type RouteState = { targetId: string; coordinates: Array<[number, number]>; distanceMeters: number; durationSeconds: number; loading?: boolean; error?: string };
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined;
 const DEFAULT_CENTER = { lat: -34.92051, lng: 138.60456 };
@@ -60,7 +61,7 @@ function placeNameFromFeature(response: any) {
   return properties.name ?? response?.features?.[0]?.text ?? "field location";
 }
 
-function bearingDegrees(from: { lat: number; lng: number }, to: { lat: number; lng: number }) {
+function bearingDegrees(from: Coordinate, to: Coordinate) {
   const radians = (value: number) => (value * Math.PI) / 180;
   const longitude = radians(to.lng - from.lng);
   const y = Math.sin(longitude) * Math.cos(radians(to.lat));
@@ -68,14 +69,55 @@ function bearingDegrees(from: { lat: number; lng: number }, to: { lat: number; l
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
+function offsetCoordinate(center: Coordinate, xMeters: number, yMeters: number): [number, number] {
+  return [
+    center.lat + yMeters / 111_320,
+    center.lng + xMeters / (111_320 * Math.cos((center.lat * Math.PI) / 180)),
+  ];
+}
+
+/** A square with softened corners so the visual field matches the server rule. */
+function roundedSquareLatLngs(center: Coordinate, halfWidthMeters: number): Array<[number, number]> {
+  const half = Math.max(1, halfWidthMeters);
+  const cornerRadius = Math.min(Math.max(12, half * 0.18), half * 0.42);
+  const edge = half - cornerRadius;
+  const points: Array<[number, number]> = [];
+  const cornerCenters: Array<[number, number, number]> = [
+    [edge, edge, 0],
+    [-edge, edge, Math.PI / 2],
+    [-edge, -edge, Math.PI],
+    [edge, -edge, Math.PI * 1.5],
+  ];
+  cornerCenters.forEach(([x, y, start]) => {
+    for (let index = 0; index <= 6; index++) {
+      const angle = start + (Math.PI / 2) * (index / 6);
+      points.push(offsetCoordinate(center, x + cornerRadius * Math.cos(angle), y + cornerRadius * Math.sin(angle)));
+    }
+  });
+  return points;
+}
+
+function formatRouteDistance(distanceMeters: number) {
+  return distanceMeters >= 1000 ? `${(distanceMeters / 1000).toFixed(1)} km` : `${Math.round(distanceMeters)} m`;
+}
+
+function formatRouteDuration(seconds: number) {
+  return `${Math.max(1, Math.ceil(seconds / 60))} min walk`;
+}
+
+function haptic(pattern: number | number[] = 18) {
+  if (typeof navigator !== "undefined" && "vibrate" in navigator) navigator.vibrate(pattern);
+}
+
 export default function TacticalMap({ center, radius, minimumRadius, points, players, trails, items, currentPlayerId, currentLocation, onMapClick, setupFocus = false, className }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const pointLayerRef = useRef<LayerGroup | null>(null);
   const trailLayerRef = useRef<LayerGroup | null>(null);
+  const routeLayerRef = useRef<LayerGroup | null>(null);
   const markersRef = useRef<Map<string, MarkerRecord>>(new Map());
-  const zoneRef = useRef<Circle | null>(null);
-  const minimumZoneRef = useRef<Circle | null>(null);
+  const zoneRef = useRef<Polygon | null>(null);
+  const minimumZoneRef = useRef<Polygon | null>(null);
   const clickRef = useRef(onMapClick);
   const placeCacheRef = useRef(new Map<string, string>());
   const initialBoundsRef = useRef(false);
@@ -84,42 +126,60 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState("");
   const [labels, setLabels] = useState<Record<string, string>>({});
+  const [routeTargetId, setRouteTargetId] = useState<string | null>(null);
+  const [routeState, setRouteState] = useState<RouteState | null>(null);
 
   const snapshotPlayers = useMemo(() => players.filter(player => player.positionKind === "snapshot" && player.lat !== null && player.lng !== null), [players]);
   const selfPlayer = players.find(player => player.id === currentPlayerId);
-  const ownPosition = selfPlayer?.lat !== null && selfPlayer?.lat !== undefined && selfPlayer.lng !== null && selfPlayer.lng !== undefined ? { lat: selfPlayer.lat, lng: selfPlayer.lng } : currentLocation;
+  const ownPosition = currentLocation ?? (selfPlayer?.lat !== null && selfPlayer?.lat !== undefined && selfPlayer.lng !== null && selfPlayer.lng !== undefined ? { lat: selfPlayer.lat, lng: selfPlayer.lng } : null);
   const directionTarget = snapshotPlayers[0];
+  const routeTarget = snapshotPlayers.find(player => player.id === routeTargetId) ?? directionTarget;
   const directionBearing = ownPosition && directionTarget?.lat !== null && directionTarget?.lat !== undefined && directionTarget.lng !== null && directionTarget.lng !== undefined ? bearingDegrees(ownPosition, { lat: directionTarget.lat, lng: directionTarget.lng }) : null;
   const fallbackImage = useMemo(() => MAPBOX_TOKEN ? `https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/${center.lng},${center.lat},15/1280x800?access_token=${encodeURIComponent(MAPBOX_TOKEN)}` : "", [center.lat, center.lng]);
   useEffect(() => { clickRef.current = onMapClick; }, [onMapClick]);
 
   useEffect(() => {
+    setRouteTargetId(current => snapshotPlayers.some(player => player.id === current) ? current : snapshotPlayers[0]?.id ?? null);
+    setRouteState(current => current && snapshotPlayers.some(player => player.id === current.targetId) ? current : null);
+  }, [snapshotPlayers]);
+
+  useEffect(() => {
     if (!MAPBOX_TOKEN) { setMapError("A Mapbox public token is required to load the field map."); return; }
     if (!containerRef.current || mapRef.current) return;
-    const map = L.map(containerRef.current, { zoomControl: false, attributionControl: true, zoomSnap: 0.25, minZoom: 12, maxZoom: 19, preferCanvas: true });
+    const map = L.map(containerRef.current, { zoomControl: false, attributionControl: true, zoomSnap: 0.25, minZoom: 12, maxZoom: 19, preferCanvas: false });
     map.setView([center.lat ?? DEFAULT_CENTER.lat, center.lng ?? DEFAULT_CENTER.lng], radius > 1500 ? 13 : radius > 700 ? 14 : 15.5, { animate: false });
     L.tileLayer(tileUrl.replace("{accessToken}", encodeURIComponent(MAPBOX_TOKEN)), { tileSize: 256, maxZoom: 19, crossOrigin: "anonymous", attribution: "© <a href=\"https://www.mapbox.com/\" target=\"_blank\">Mapbox</a>" }).on("tileerror", () => {
       setMapError("Street tiles are delayed; the detailed Mapbox fallback remains available.");
     }).addTo(map);
     pointLayerRef.current = L.layerGroup().addTo(map);
     trailLayerRef.current = L.layerGroup().addTo(map);
-    zoneRef.current = L.circle([center.lat, center.lng], { radius, color: "#23e0cf", weight: 3, opacity: 0.9, fillColor: "#23e0cf", fillOpacity: 0.07, interactive: false }).addTo(map);
-    if (minimumRadius) minimumZoneRef.current = L.circle([center.lat, center.lng], { radius: minimumRadius, color: "#f5cb55", weight: 2, opacity: 0.92, fill: false, dashArray: "7 7", interactive: false }).addTo(map);
+    routeLayerRef.current = L.layerGroup().addTo(map);
+    zoneRef.current = L.polygon(roundedSquareLatLngs(center, radius), { color: "#23e0cf", weight: 3, opacity: 0.94, fillColor: "#23e0cf", fillOpacity: 0.07, interactive: false }).addTo(map);
+    if (minimumRadius) minimumZoneRef.current = L.polygon(roundedSquareLatLngs(center, minimumRadius), { color: "#f5cb55", weight: 2, opacity: 0.92, fill: false, dashArray: "7 7", interactive: false }).addTo(map);
     map.on("click", event => clickRef.current?.({ lat: event.latlng.lat, lng: event.latlng.lng }));
     mapRef.current = map;
     centerRef.current = `${center.lat.toFixed(6)},${center.lng.toFixed(6)}`;
     window.setTimeout(() => { map.invalidateSize(false); setMapReady(true); }, 0);
-    return () => { markersRef.current.clear(); map.remove(); mapRef.current = null; pointLayerRef.current = null; trailLayerRef.current = null; zoneRef.current = null; minimumZoneRef.current = null; };
+    return () => {
+      markersRef.current.clear();
+      map.remove();
+      mapRef.current = null;
+      pointLayerRef.current = null;
+      trailLayerRef.current = null;
+      routeLayerRef.current = null;
+      zoneRef.current = null;
+      minimumZoneRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     const centerKey = `${center.lat.toFixed(6)},${center.lng.toFixed(6)}`;
-    zoneRef.current?.setLatLng([center.lat, center.lng]).setRadius(radius);
+    zoneRef.current?.setLatLngs(roundedSquareLatLngs(center, radius));
     if (minimumRadius) {
-      if (!minimumZoneRef.current) minimumZoneRef.current = L.circle([center.lat, center.lng], { radius: minimumRadius, color: "#f5cb55", weight: 2, opacity: 0.92, fill: false, dashArray: "7 7", interactive: false }).addTo(map);
-      minimumZoneRef.current.setLatLng([center.lat, center.lng]).setRadius(minimumRadius);
+      if (!minimumZoneRef.current) minimumZoneRef.current = L.polygon(roundedSquareLatLngs(center, minimumRadius), { color: "#f5cb55", weight: 2, opacity: 0.92, fill: false, dashArray: "7 7", interactive: false }).addTo(map);
+      minimumZoneRef.current.setLatLngs(roundedSquareLatLngs(center, minimumRadius));
     } else { minimumZoneRef.current?.remove(); minimumZoneRef.current = null; }
     if (!initialBoundsRef.current) {
       map.fitBounds(zoneRef.current?.getBounds() ?? L.latLngBounds([center.lat, center.lng], [center.lat, center.lng]), { padding: [42, 42], animate: false, maxZoom: 16 });
@@ -135,16 +195,16 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
     if (!mapReady || !map) return;
     if (!setupFocus) { setupFocusRef.current = false; return; }
     if (!setupFocusRef.current) {
-      map.setView([center.lat, center.lng], Math.max(17, map.getZoom()), { animate: true });
+      const fieldBounds = zoneRef.current?.getBounds();
+      if (fieldBounds?.isValid()) map.fitBounds(fieldBounds, { padding: [48, 48], maxZoom: radius > 700 ? 14.8 : 15.5, animate: true });
       setupFocusRef.current = true;
     }
-  }, [setupFocus, mapReady, center]);
+  }, [setupFocus, mapReady, center, radius]);
 
   useEffect(() => {
-    const map = mapRef.current;
     const markerLayer = pointLayerRef.current;
-    if (!map || !markerLayer) return;
-    const next = new Map<string, { position: { lat: number; lng: number }; signature: string; icon: L.DivIcon }>();
+    if (!markerLayer) return;
+    const next = new Map<string, { position: Coordinate; signature: string; icon: L.DivIcon }>();
     points.forEach(point => {
       next.set(`point:${point.id}`, { position: point, signature: `point:${point.type}:${point.label}:${point.lat.toFixed(6)}:${point.lng.toFixed(6)}`, icon: makeIcon("point", point.label, null, point.type) });
     });
@@ -155,10 +215,8 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
       const location = labels[player.id] ?? "field location";
       next.set(`ping:${player.id}`, { position: { lat: player.lat!, lng: player.lng! }, signature: `ping:${player.profileImageUrl ?? ""}:${player.name}:${location}:${player.lat!.toFixed(6)}:${player.lng!.toFixed(6)}:${player.role}`, icon: makeIcon("snapshot", `${player.name} · LAST PING near ${location}`, player.profileImageUrl, player.role) });
     });
-    if (selfPlayer?.lat !== null && selfPlayer?.lat !== undefined && selfPlayer.lng !== null && selfPlayer.lng !== undefined) {
-      next.set("self", { position: { lat: selfPlayer.lat, lng: selfPlayer.lng }, signature: `self:${selfPlayer.profileImageUrl ?? ""}:${selfPlayer.name}:${selfPlayer.lat.toFixed(6)}:${selfPlayer.lng.toFixed(6)}:${selfPlayer.role}`, icon: makeIcon("self", selfPlayer.name, selfPlayer.profileImageUrl, selfPlayer.role) });
-    } else if (currentLocation) {
-      next.set("self", { position: currentLocation, signature: `self:local:${currentLocation.lat.toFixed(6)}:${currentLocation.lng.toFixed(6)}`, icon: makeIcon("self", "YOU", null, "survivor") });
+    if (ownPosition) {
+      next.set("self", { position: ownPosition, signature: `self:${selfPlayer?.profileImageUrl ?? ""}:${selfPlayer?.name ?? "YOU"}:${ownPosition.lat.toFixed(6)}:${ownPosition.lng.toFixed(6)}:${selfPlayer?.role ?? "survivor"}`, icon: makeIcon("self", selfPlayer?.name ?? "YOU", selfPlayer?.profileImageUrl, selfPlayer?.role ?? "survivor") });
     }
     markersRef.current.forEach((record, key) => { if (!next.has(key)) { markerLayer.removeLayer(record.marker); markersRef.current.delete(key); } });
     next.forEach((definition, key) => {
@@ -172,7 +230,7 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
         existing.signature = definition.signature;
       }
     });
-  }, [points, items, snapshotPlayers, selfPlayer, currentLocation, labels, mapReady]);
+  }, [points, items, snapshotPlayers, selfPlayer, ownPosition, labels, mapReady]);
 
   useEffect(() => {
     const trailLayer = trailLayerRef.current;
@@ -180,6 +238,14 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
     trailLayer.clearLayers();
     trails.forEach(trail => L.polyline([[trail.fromLat, trail.fromLng], [trail.toLat, trail.toLng]], { color: "#ff455c", weight: 7, opacity: 0.72, interactive: false }).addTo(trailLayer));
   }, [trails, mapReady]);
+
+  useEffect(() => {
+    const routeLayer = routeLayerRef.current;
+    if (!routeLayer) return;
+    routeLayer.clearLayers();
+    if (!routeState || routeState.loading || routeState.error || routeState.coordinates.length < 2) return;
+    L.polyline(routeState.coordinates.map(([lng, lat]) => [lat, lng] as [number, number]), { color: "#f5cb55", weight: 7, opacity: 0.95, lineCap: "round", lineJoin: "round", dashArray: "12 9", interactive: false }).addTo(routeLayer);
+  }, [routeState, mapReady]);
 
   useEffect(() => {
     if (!snapshotPlayers.length || !MAPBOX_TOKEN) return;
@@ -201,16 +267,41 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
   const recenter = useCallback(() => {
     const map = mapRef.current;
     if (!map) return;
-    map.setView([currentLocation?.lat ?? center.lat, currentLocation?.lng ?? center.lng], currentLocation ? 17 : (radius > 1500 ? 13 : 15.5), { animate: true });
-  }, [center, currentLocation, radius]);
-  const zoom = (delta: number) => mapRef.current?.setZoom((mapRef.current.getZoom() ?? 15) + delta, { animate: true });
+    map.setView([ownPosition?.lat ?? center.lat, ownPosition?.lng ?? center.lng], ownPosition ? 17 : (radius > 1500 ? 13 : 15.5), { animate: true });
+    haptic(12);
+  }, [center, ownPosition, radius]);
+  const zoom = (delta: number) => { mapRef.current?.setZoom((mapRef.current.getZoom() ?? 15) + delta, { animate: true }); haptic(8); };
+  const buildRoute = async () => {
+    if (!routeTarget || !ownPosition || !MAPBOX_TOKEN) {
+      setRouteState({ targetId: routeTarget?.id ?? "", coordinates: [], distanceMeters: 0, durationSeconds: 0, error: "Location is needed before a route can be built." });
+      return;
+    }
+    setRouteState({ targetId: routeTarget.id, coordinates: [], distanceMeters: 0, durationSeconds: 0, loading: true });
+    haptic([18, 22, 18]);
+    try {
+      const response = await fetch(`https://api.mapbox.com/directions/v5/mapbox/walking/${ownPosition.lng},${ownPosition.lat};${routeTarget.lng},${routeTarget.lat}?alternatives=false&geometries=geojson&overview=full&steps=false&access_token=${encodeURIComponent(MAPBOX_TOKEN)}`);
+      const result = await response.json();
+      const route = result?.routes?.[0];
+      if (!response.ok || !route?.geometry?.coordinates?.length) throw new Error(result?.message ?? "Mapbox could not build a walking route.");
+      const next = { targetId: routeTarget.id, coordinates: route.geometry.coordinates as Array<[number, number]>, distanceMeters: Number(route.distance ?? 0), durationSeconds: Number(route.duration ?? 0) };
+      setRouteState(next);
+      const map = mapRef.current;
+      if (map) map.fitBounds(L.latLngBounds(next.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])), { padding: [52, 52], maxZoom: 17, animate: true });
+      haptic([25, 30, 25]);
+    } catch (error) {
+      setRouteState({ targetId: routeTarget.id, coordinates: [], distanceMeters: 0, durationSeconds: 0, error: error instanceof Error ? error.message : "Could not build a walking route." });
+      haptic([70, 35, 70]);
+    }
+  };
 
+  const routeIsCurrent = routeState?.targetId === routeTarget?.id;
   return <div className={`field-map mapbox-field relative min-h-[500px] overflow-hidden rounded-2xl border border-white/10 bg-[#0a151a] ${className ?? ""}`}>
     {fallbackImage && <img src={fallbackImage} className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover" alt="Mapbox street map fallback" onError={() => setMapError("Mapbox street imagery could not be reached. Check the network and token domain settings.")} />}
     <div ref={containerRef} className="absolute inset-0 z-[1]" aria-label="Interactive two-dimensional field map" />
     <div className="pointer-events-none absolute inset-x-4 top-4 z-10 flex items-start justify-between gap-3"><div className="rounded-xl border border-teal-300/30 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.12em] text-teal-100 shadow-lg"><span className="block text-[9px] text-slate-400">FIELD MAP</span>2D STREET DETAIL</div>{mapError && <div className="max-w-xs rounded-xl border border-amber-300/50 bg-[#071116]/95 px-3 py-2 text-xs font-bold text-amber-100">{mapError}</div>}</div>
     {directionBearing !== null && <div className="pointer-events-none absolute right-4 top-16 z-10 flex items-center gap-2 rounded-xl border border-[#ff455c]/35 bg-[#071116]/92 px-2.5 py-2 text-[10px] font-black tracking-[.08em] text-[#ffb0ba]"><Navigation size={20} className="text-[#ff455c]" style={{ transform: `rotate(${directionBearing}deg)` }} fill="currentColor" /><span>LAST PING<br />{directionTarget.name.toUpperCase()}</span></div>}
-    {minimumRadius && onMapClick && <div className="pointer-events-none absolute bottom-4 left-4 z-10 rounded-xl border border-[#f5cb55]/40 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.1em] text-[#f9e29a]">DASHED RING · MINIMUM ZONE {Math.round(minimumRadius)} M</div>}
+    {routeTarget && ownPosition && <div className="absolute bottom-4 left-4 z-20 max-w-[min(19rem,calc(100%-5.5rem))] rounded-xl border border-[#f5cb55]/50 bg-[#071116]/95 p-2.5 shadow-xl"><div className="flex items-center gap-2"><div className="grid h-8 w-8 place-items-center rounded-lg bg-[#f5cb55] text-[#071116]"><Footprints size={17} /></div><div className="min-w-0 flex-1"><div className="truncate text-[10px] font-black tracking-[.1em] text-[#f9e29a]">LAST PING · {routeTarget.name.toUpperCase()}</div><div className="text-[10px] font-bold text-slate-400">{routeIsCurrent && !routeState?.loading && !routeState?.error ? `${formatRouteDistance(routeState.distanceMeters)} · ${formatRouteDuration(routeState.durationSeconds)}` : "Walking route from your location"}</div></div></div>{snapshotPlayers.length > 1 && <div className="mt-2 flex gap-1 overflow-x-auto pb-0.5">{snapshotPlayers.map(player => <button key={player.id} onClick={() => { setRouteTargetId(player.id); setRouteState(null); haptic(10); }} className={`whitespace-nowrap rounded-md px-2 py-1 text-[9px] font-black ${player.id === routeTarget.id ? "bg-[#f5cb55] text-[#071116]" : "bg-white/10 text-slate-300"}`}>{player.name}</button>)}</div>}<div className="mt-2 flex gap-2"><button onClick={() => void buildRoute()} disabled={routeState?.loading} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#f5cb55] px-3 py-2 text-[10px] font-black text-[#071116] disabled:opacity-60"><RouteIcon size={14} />{routeState?.loading ? "ROUTING…" : "ROUTE TO PING"}</button>{routeIsCurrent && <button onClick={() => { setRouteState(null); haptic(10); }} className="grid h-8 w-8 place-items-center rounded-lg bg-white/10 text-slate-200" aria-label="Clear route"><X size={15} /></button>}</div>{routeIsCurrent && routeState?.error && <p className="mt-2 text-[10px] font-bold text-[#ff9ba8]">{routeState.error}</p>}</div>}
+    {minimumRadius && onMapClick && <div className="pointer-events-none absolute bottom-4 left-4 z-10 rounded-xl border border-[#f5cb55]/40 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.1em] text-[#f9e29a]">DASHED ROUNDED SQUARE · MINIMUM {Math.round(minimumRadius)} M</div>}
     <div className="absolute bottom-4 right-4 z-20 grid gap-2"><button onClick={() => zoom(1)} className="field-map__control" aria-label="Zoom in"><ZoomIn size={19} /></button><button onClick={() => zoom(-1)} className="field-map__control" aria-label="Zoom out"><ZoomOut size={19} /></button><button onClick={recenter} className="field-map__control" aria-label="Recenter map"><Crosshair size={19} /></button></div>
     {!mapReady && <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center bg-[#071116]/45 text-center"><MapPinned className="mx-auto mb-3 animate-pulse text-teal-200" /><div className="text-xs font-black tracking-[0.16em] text-teal-100">LOADING FIELD MAP</div></div>}
   </div>;

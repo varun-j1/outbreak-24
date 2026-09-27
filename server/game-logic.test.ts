@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveRules, distanceToSegmentMeters, effectiveStormRadius, metersBetween, pingIntervalSeconds } from "./game-logic";
+import { deriveRules, distanceToSegmentMeters, effectiveStormRadius, metersBetween, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds } from "./game-logic";
 
 describe("game rule utilities", () => {
   it("measures short outdoor distances", () => {
@@ -37,11 +37,26 @@ describe("game rule utilities", () => {
     expect(long.stormStartsAtSeconds).toBe(300);
   });
 
+  it("uses the host-selected ping interval when one is set", () => {
+    const fixed = deriveRules(12, 3);
+    const adaptive = deriveRules(12, 0);
+    expect(scheduledPingIntervalSeconds(fixed, 3, () => 0)).toBe(180);
+    expect(scheduledPingIntervalSeconds(adaptive, 3, () => 0)).toBe(pingIntervalSeconds(3, adaptive.matchSeconds, () => 0));
+  });
+
   it("contracts the zone continuously during the announced shrink", () => {
     const end = new Date("2026-01-01T00:00:30.000Z");
     const base = { currentRadius: 200, minimumRadius: 100, stormPhase: "contracting", stormPhaseEndsAt: end };
     expect(effectiveStormRadius(base, new Date("2026-01-01T00:00:00.000Z"))).toBe(200);
     expect(effectiveStormRadius(base, new Date("2026-01-01T00:00:15.000Z"))).toBe(185);
     expect(effectiveStormRadius(base, end)).toBe(170);
+  });
+
+  it("uses a rounded-square boundary instead of a circular play area", () => {
+    const center = { lat: 0, lng: 0 };
+    // This diagonal position is inside a 100 m square but outside a 100 m circle.
+    expect(roundedSquarePositionWithinBounds(center, { lat: 0.0008, lng: 0.0008 }, 100)).toBe(true);
+    expect(roundedSquarePositionWithinBounds(center, { lat: 0.0011, lng: 0 }, 100)).toBe(false);
+    expect(roundedSquarePositionWithinBounds(center, { lat: 0.00088, lng: 0.00088 }, 100)).toBe(false);
   });
 });

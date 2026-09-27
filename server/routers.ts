@@ -3,7 +3,7 @@ import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
-import { assignZombie, collectItem, createGame, gameSnapshot, joinGame, openBriefing, pauseGame, rejoinGame, reportLocation, resolveCapture, setReady, startGame, updateSetup, useItem } from "./db";
+import { assignZombie, collectItem, createGame, gameSnapshot, joinGame, openBriefing, pauseGame, rejoinGame, reportLocation, resolveCapture, setReady, startGame, stopGame, updateSetup, useItem } from "./db";
 
 const sessionInput = z.object({ gameId: z.string().min(1), playerToken: z.string().min(20) });
 const nameInput = z.string().trim().min(2, "Use at least two characters.").max(36, "Use 36 characters or fewer.");
@@ -28,6 +28,7 @@ export const appRouter = router({
       initialRadius: z.number().min(100).max(5_000),
       minimumRadius: z.number().min(50).max(4_000),
       matchMinutes: z.number().int().min(6).max(45),
+      pingIntervalMinutes: z.number().int().min(0).max(10),
       points: z.array(z.object({ id: z.string().optional(), type: z.enum(["extraction", "powerup_candidate"]), label: z.string().min(1).max(32), lat: z.number(), lng: z.number() })).max(12),
     })).mutation(({ input }) => updateSetup(input, input)),
     setReady: publicProcedure.input(sessionInput.extend({ isReady: z.boolean() })).mutation(({ input }) => setReady(input, input.isReady)),
@@ -35,6 +36,7 @@ export const appRouter = router({
     openBriefing: publicProcedure.input(sessionInput).mutation(({ input }) => openBriefing(input)),
     start: publicProcedure.input(sessionInput).mutation(({ input }) => startGame(input)),
     pause: publicProcedure.input(sessionInput.extend({ paused: z.boolean() })).mutation(({ input }) => pauseGame(input, input.paused)),
+    stop: publicProcedure.input(sessionInput).mutation(({ input }) => stopGame(input)),
     reportLocation: publicProcedure.input(sessionInput.extend({ lat: z.number().gte(-90).lte(90), lng: z.number().gte(-180).lte(180), accuracy: z.number().min(0).max(5_000) })).mutation(({ input }) => reportLocation(input, input)),
     collectItem: publicProcedure.input(sessionInput.extend({ itemId: z.string() })).mutation(({ input }) => collectItem(input, input.itemId)),
     useItem: publicProcedure.input(sessionInput).mutation(({ input }) => useItem(input)),

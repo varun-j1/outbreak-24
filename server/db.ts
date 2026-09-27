@@ -12,7 +12,7 @@ import {
   InsertUser,
   users,
 } from "../drizzle/schema";
-import { DEFAULT_RULES, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, markerPositionWithinBounds, metersBetween, parseRules, pingIntervalSeconds } from "./game-logic";
+import { DEFAULT_RULES, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, metersBetween, parseRules, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds } from "./game-logic";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -151,15 +151,17 @@ export async function addEvent(
   await db.insert(gameEvents).values({ id: id(), gameId, type, actorPlayerId, targetPlayerId, visibility, payloadJson: JSON.stringify(payload) });
 }
 
-export async function updateSetup(session: GuestSession, setup: { centerLat: number; centerLng: number; initialRadius: number; minimumRadius: number; matchMinutes: number; points: Array<{ id?: string; type: "extraction" | "powerup_candidate"; label: string; lat: number; lng: number }> }) {
+export async function updateSetup(session: GuestSession, setup: { centerLat: number; centerLng: number; initialRadius: number; minimumRadius: number; matchMinutes: number; pingIntervalMinutes: number; points: Array<{ id?: string; type: "extraction" | "powerup_candidate"; label: string; lat: number; lng: number }> }) {
   const db = await requireDb();
   const player = await getSessionPlayer(session);
   if (!player.isHost) throw new Error("Only the host can configure the playing area.");
+  const existingGame = (await db.select().from(games).where(eq(games.id, session.gameId)).limit(1))[0];
+  if (!existingGame || !["setup", "lobby"].includes(existingGame.status)) throw new Error("This game can no longer be configured.");
   if (setup.minimumRadius > setup.initialRadius) throw new Error("The minimum radius cannot exceed the starting radius.");
   const extractionPoints = setup.points.filter(point => point.type === "extraction");
   if (extractionPoints.length < 2 || extractionPoints.length > 4) throw new Error("Place between two and four potential extraction points.");
-  if (extractionPoints.some(point => !markerPositionWithinBounds({ lat: setup.centerLat, lng: setup.centerLng }, point, setup.minimumRadius, 20))) {
-    throw new Error("Extraction points must fit inside the smallest zone.");
+  if (extractionPoints.some(point => !roundedSquarePositionWithinBounds({ lat: setup.centerLat, lng: setup.centerLng }, point, setup.minimumRadius, 20))) {
+    throw new Error("Extraction points must fit inside the smallest rounded-square zone.");
   }
   await db.update(games).set({
     centerLat: setup.centerLat,
@@ -167,7 +169,7 @@ export async function updateSetup(session: GuestSession, setup: { centerLat: num
     initialRadius: setup.initialRadius,
     minimumRadius: setup.minimumRadius,
     currentRadius: setup.initialRadius,
-    rulesJson: JSON.stringify(deriveRules(setup.matchMinutes)),
+    rulesJson: JSON.stringify(deriveRules(setup.matchMinutes, setup.pingIntervalMinutes)),
     briefingOpenedAt: null,
     status: "lobby",
   }).where(eq(games.id, session.gameId));
@@ -213,7 +215,7 @@ export async function startGame(session: GuestSession) {
   const host = await getSessionPlayer(session);
   if (!host.isHost) throw new Error("Only the host can start the match.");
   const game = (await db.select().from(games).where(eq(games.id, session.gameId)).limit(1))[0];
-  if (!game || game.status === "running") throw new Error("This match cannot be started.");
+  if (!game || game.status !== "lobby") throw new Error("This match cannot be started.");
   if (!game.briefingOpenedAt) throw new Error("Open the mission briefing for the whole team before starting.");
   const players = await db.select().from(gamePlayers).where(eq(gamePlayers.gameId, session.gameId));
   if (players.length < 2) throw new Error("At least two players are needed to start.");
@@ -227,7 +229,7 @@ export async function startGame(session: GuestSession) {
   await db.update(gamePoints).set({ isActive: false }).where(and(eq(gamePoints.gameId, session.gameId), eq(gamePoints.type, "extraction")));
   const rules = parseRules(game.rulesJson);
   await db.update(games).set({
-    status: "running", startedAt: now, pausedAt: null, pausedSeconds: 0, nextPingAt: new Date(now.getTime() + (rules.headStartSeconds + pingIntervalSeconds(players.filter(player => player.role === "survivor").length, rules.matchSeconds)) * 1_000),
+    status: "running", startedAt: now, pausedAt: null, pausedSeconds: 0, nextPingAt: new Date(now.getTime() + (rules.headStartSeconds + scheduledPingIntervalSeconds(rules, players.filter(player => player.role === "survivor").length)) * 1_000),
     lastCaptureAt: now, stormPhase: "normal", stormPhaseEndsAt: null, lastItemSpawnAt: now, winner: null, finishedAt: null,
   }).where(eq(games.id, session.gameId));
   await db.update(gamePlayers).set({ status: "active", extractionStartedAt: null, boundaryOutsideSince: null, boundaryExposed: false, lastPingLat: null, lastPingLng: null, lastPingAt: null, lastPingExpiresAt: null, videoDueAt: null, videoUploadDeadlineAt: null, videoExposureUntil: null }).where(eq(gamePlayers.gameId, session.gameId));
@@ -246,8 +248,23 @@ export async function pauseGame(session: GuestSession, paused: boolean) {
   } else if (!paused && game.status === "paused") {
     const pausedFor = game.pausedAt ? Math.round((now.getTime() - game.pausedAt.getTime()) / 1000) : 0;
     await db.update(games).set({ status: "running", pausedAt: null, pausedSeconds: game.pausedSeconds + pausedFor }).where(eq(games.id, game.id));
+  } else {
+    throw new Error("This game cannot be paused or resumed right now.");
   }
   await addEvent(session.gameId, paused ? "match_paused" : "match_resumed", host.id, null, "public", {});
+}
+
+/** Allows the host to end a lobby or active field session with an explicit broadcast. */
+export async function stopGame(session: GuestSession) {
+  const db = await requireDb();
+  const host = await getSessionPlayer(session);
+  if (!host.isHost) throw new Error("Only the host can stop the game.");
+  const game = (await db.select().from(games).where(eq(games.id, session.gameId)).limit(1))[0];
+  if (!game) throw new Error("Game not found.");
+  if (game.status === "finished") throw new Error("This game has already ended.");
+  const now = new Date();
+  await db.update(games).set({ status: "finished", winner: null, finishedAt: now, pausedAt: null }).where(eq(games.id, game.id));
+  await addEvent(session.gameId, game.status === "running" || game.status === "paused" ? "match_stopped" : "lobby_cancelled", host.id, null, "public", { by: host.displayName });
 }
 
 export async function tickGame(gameId: string) {
@@ -307,7 +324,7 @@ export async function tickGame(gameId: string) {
         await db.update(gamePlayers).set({ videoDueAt: now, videoUploadDeadlineAt: new Date(now.getTime() + 30_000), videoExposureUntil: null }).where(eq(gamePlayers.id, player.id));
       }
     }
-    const next = new Date(now.getTime() + pingIntervalSeconds(survivors.length, rules.matchSeconds) * 1000);
+    const next = new Date(now.getTime() + scheduledPingIntervalSeconds(rules, survivors.length) * 1000);
     await db.update(games).set({ nextPingAt: next }).where(eq(games.id, game.id));
     await addEvent(game.id, "survivor_ping", null, null, "public", { survivorCount: survivors.length, nextPingAt: next.toISOString() });
   }
@@ -345,7 +362,7 @@ export async function tickGame(gameId: string) {
     const points = await db.select().from(gamePoints).where(and(eq(gamePoints.gameId, game.id), eq(gamePoints.type, "powerup_candidate")));
     const effectiveRadius = effectiveStormRadius(game, now);
     const announcedNextRadius = game.stormPhase === "normal" ? effectiveRadius : Math.max(game.minimumRadius, game.currentRadius * 0.85);
-    const eligible = points.filter(point => markerPositionWithinBounds({ lat: game.centerLat, lng: game.centerLng }, point, Math.min(effectiveRadius, announcedNextRadius)));
+    const eligible = points.filter(point => roundedSquarePositionWithinBounds({ lat: game.centerLat, lng: game.centerLng }, point, Math.min(effectiveRadius, announcedNextRadius)));
     if (activeItems.length < 2 && eligible.length) {
       const point = eligible[Math.floor(Math.random() * eligible.length)];
       const faction: "survivor" | "zombie" = Math.random() > 0.5 ? "survivor" : "zombie";
@@ -357,7 +374,7 @@ export async function tickGame(gameId: string) {
   }
   const activeRadius = effectiveStormRadius(game, now);
   const activeItems = await db.select().from(gameItems).where(and(eq(gameItems.gameId, game.id), eq(gameItems.status, "active")));
-  for (const item of activeItems.filter(item => item.expiresAt <= now || !markerPositionWithinBounds({ lat: game.centerLat, lng: game.centerLng }, item, activeRadius))) {
+  for (const item of activeItems.filter(item => item.expiresAt <= now || !roundedSquarePositionWithinBounds({ lat: game.centerLat, lng: game.centerLng }, item, activeRadius))) {
     await db.update(gameItems).set({ status: "expired" }).where(eq(gameItems.id, item.id));
   }
 }
@@ -374,8 +391,12 @@ export async function reportLocation(session: GuestSession, location: { lat: num
     ? { lat: player.lastLat, lng: player.lastLng }
     : null;
   const current = { lat: location.lat, lng: location.lng };
-  const distanceToCenter = metersBetween({ lat: game.centerLat, lng: game.centerLng }, current);
-  const safelyInside = distanceToCenter <= effectiveStormRadius(game, now) + Math.max(10, location.accuracy || 0);
+  const safelyInside = roundedSquarePositionWithinBounds(
+    { lat: game.centerLat, lng: game.centerLng },
+    current,
+    effectiveStormRadius(game, now),
+    -Math.max(10, location.accuracy || 0),
+  );
   let boundaryOutsideSince = player.boundaryOutsideSince;
   let boundaryExposed = player.boundaryExposed;
   let status: "active" | "forfeited" = player.status;

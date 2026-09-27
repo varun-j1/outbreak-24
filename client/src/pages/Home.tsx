@@ -91,7 +91,6 @@ export default function Home() {
 
     <section className="relative mx-auto grid max-w-6xl gap-10 px-5 pb-14 pt-8 md:grid-cols-[1.1fr_0.9fr] md:px-8 md:pt-20">
       <div className="max-w-2xl self-center">
-        <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-teal-300/20 bg-teal-300/10 px-3 py-1.5 text-xs font-bold tracking-wide text-teal-100"><span className="h-2 w-2 rounded-full bg-teal-300" /> LIVE FIELD PROTOTYPE</div>
         <h1 className="text-balance text-5xl font-black leading-[0.9] tracking-[-0.06em] text-white sm:text-6xl lg:text-7xl">WELCOME TO <span className="text-[#ff455c]">OUTBREAK.</span></h1>
         <p className="mt-6 max-w-xl text-pretty text-base leading-7 text-slate-300">A real-world team chase game built around one map, short pings, and a clean objective: escape or infect.</p>
         <div className="mt-8 grid max-w-xl grid-cols-3 gap-3 text-center text-xs">

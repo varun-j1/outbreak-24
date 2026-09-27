@@ -49,7 +49,6 @@
 .mapbox-field .mapboxgl-ctrl-bottom-left, .mapbox-field .mapboxgl-ctrl-bottom-right { z-index: 4; }
 .mapbox-field .mapboxgl-ctrl-bottom-right { right: 58px; bottom: 5px; }
 .mapbox-field .leaflet-container { height: 100%; width: 100%; background: #0a151a; font-family: "Manrope", Arial, sans-serif; }
-.mapbox-field .leaflet-pane, .mapbox-field .leaflet-top, .mapbox-field .leaflet-bottom { z-index: auto; }
 .mapbox-field .leaflet-control-attribution { padding: 1px 5px; background: rgba(7,17,22,.7); color: #8ba0ab; font-size: 9px; }
 .mapbox-field .leaflet-control-attribution a { color: #8ba0ab; }
 .field-map__leaflet-marker { background: transparent; border: 0; }
