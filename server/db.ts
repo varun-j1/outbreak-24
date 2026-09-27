@@ -12,7 +12,7 @@ import {
   InsertUser,
   users,
 } from "../drizzle/schema";
-import { DEFAULT_RULES, buildMatchRecap, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, metersBetween, parseRules, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds } from "./game-logic";
+import { DEFAULT_RULES, buildMatchRecap, canViewSurvivorPing, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, metersBetween, parseRules, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds, stormShrinkMeters } from "./game-logic";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -347,11 +347,13 @@ export async function tickGame(gameId: string) {
   const secondsSinceCapture = game.lastCaptureAt ? (now.getTime() - game.lastCaptureAt.getTime()) / 1000 : 0;
   // The red-zone pressure starts only after five full minutes of play.
   if (elapsed >= rules.stormStartsAtSeconds && game.stormPhase === "normal" && secondsSinceCapture >= 120 && game.currentRadius > game.minimumRadius) {
+    const shrinkMeters = stormShrinkMeters(game.currentRadius, game.minimumRadius);
     await db.update(games).set({ stormPhase: "warning", stormPhaseEndsAt: new Date(now.getTime() + 30_000) }).where(eq(games.id, game.id));
-    await addEvent(game.id, "storm_warning", null, null, "public", { seconds: 30 });
+    await addEvent(game.id, "storm_warning", null, null, "public", { seconds: 30, shrinkMeters });
   } else if (game.stormPhase === "warning" && game.stormPhaseEndsAt && game.stormPhaseEndsAt <= now) {
+    const shrinkMeters = stormShrinkMeters(game.currentRadius, game.minimumRadius);
     await db.update(games).set({ stormPhase: "contracting", stormPhaseEndsAt: new Date(now.getTime() + 30_000) }).where(eq(games.id, game.id));
-    await addEvent(game.id, "storm_contracting", null, null, "public", { percent: 15 });
+    await addEvent(game.id, "storm_contracting", null, null, "public", { percent: 15, shrinkMeters });
   } else if (game.stormPhase === "contracting" && game.stormPhaseEndsAt && game.stormPhaseEndsAt <= now) {
     const nextRadius = Math.max(game.minimumRadius, game.currentRadius * 0.85);
     await db.update(games).set({ currentRadius: nextRadius, stormPhase: "normal", stormPhaseEndsAt: null, lastCaptureAt: now }).where(eq(games.id, game.id));
@@ -527,7 +529,7 @@ export async function gameSnapshot(session: GuestSession) {
   const visiblePlayers = allPlayers.map(target => {
     const base = { id: target.id, name: target.displayName, profileImageUrl: target.profileImageKey ? `/manus-storage/${target.profileImageKey}` : null, role: target.role, status: target.status, isHost: target.isHost, isReady: target.isReady, exposureUntil: target.videoExposureUntil && target.videoExposureUntil > now ? target.videoExposureUntil : target.trailExposureUntil, boundaryExposed: target.boundaryExposed, lastLocationAt: target.lastLocationAt, pingedAt: target.lastPingAt };
     if (canSeeLiveSurvivor(target) || (viewer.role === "zombie" && target.role === "zombie")) return { ...base, lat: target.lastLat, lng: target.lastLng, positionKind: "live" as const };
-    if (target.role === "survivor" && target.lastPingLat !== null && target.lastPingLng !== null && target.lastPingExpiresAt && target.lastPingExpiresAt > now) return { ...base, lat: target.lastPingLat, lng: target.lastPingLng, positionKind: "snapshot" as const };
+    if (target.lastPingLat !== null && target.lastPingLng !== null && canViewSurvivorPing({ viewerId: viewer.id, viewerRole: viewer.role, targetId: target.id, targetRole: target.role, pingedAt: target.lastPingAt, expiresAt: target.lastPingExpiresAt, now })) return { ...base, lat: target.lastPingLat, lng: target.lastPingLng, positionKind: "snapshot" as const };
     return { ...base, lat: null, lng: null, positionKind: "hidden" as const };
   });
   const visibleEvents = events.filter(event => event.visibility === "public" || (event.visibility === "host" && isHost) || (event.visibility === "target" && event.targetPlayerId === viewer.id) || (event.visibility === "zombies" && viewer.role === "zombie") || (event.visibility === "survivors" && viewer.role === "survivor"));
@@ -545,7 +547,7 @@ export async function gameSnapshot(session: GuestSession) {
     viewer: { id: viewer.id, name: viewer.displayName, role: viewer.role, status: viewer.status, isHost: viewer.isHost, inventory: viewer.inventory, videoSkipArmed: viewer.videoSkipArmed, videoDueAt: viewer.videoDueAt, videoUploadDeadlineAt: viewer.videoUploadDeadlineAt, videoExposureUntil: viewer.videoExposureUntil, staleLocationSeconds, extractionStartedAt: viewer.extractionStartedAt, boundaryOutsideSince: viewer.boundaryOutsideSince },
     players: visiblePlayers,
     points: visiblePoints,
-    trails: viewer.role === "zombie" || isHost ? trails : [],
+    trails: viewer.role === "zombie" ? trails : [],
     items: visibleItems,
     events: visibleEvents.map(event => ({ ...event, payload: event.payloadJson ? JSON.parse(event.payloadJson) : {} })),
     media: visibleMedia,

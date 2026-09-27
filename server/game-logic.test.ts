@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMatchRecap, deriveRules, distanceToSegmentMeters, effectiveStormRadius, metersBetween, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds } from "./game-logic";
+import { buildMatchRecap, canViewSurvivorPing, deriveRules, distanceToSegmentMeters, effectiveStormRadius, metersBetween, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds, stormShrinkMeters } from "./game-logic";
 
 describe("game rule utilities", () => {
   it("measures short outdoor distances", () => {
@@ -50,6 +50,18 @@ describe("game rule utilities", () => {
     expect(effectiveStormRadius(base, new Date("2026-01-01T00:00:00.000Z"))).toBe(200);
     expect(effectiveStormRadius(base, new Date("2026-01-01T00:00:15.000Z"))).toBe(185);
     expect(effectiveStormRadius(base, end)).toBe(170);
+    expect(stormShrinkMeters(200, 100)).toBe(30);
+    expect(stormShrinkMeters(120, 110)).toBe(10);
+  });
+
+  it("limits survivor pings to zombies or a ten-second survivor confirmation", () => {
+    const pingedAt = new Date("2026-01-01T00:00:00.000Z");
+    const expiresAt = new Date("2026-01-01T00:00:35.000Z");
+    const shared = { targetId: "survivor-a", targetRole: "survivor", pingedAt, expiresAt };
+    expect(canViewSurvivorPing({ ...shared, viewerId: "zombie-a", viewerRole: "zombie", now: new Date("2026-01-01T00:00:30.000Z") })).toBe(true);
+    expect(canViewSurvivorPing({ ...shared, viewerId: "teammate-a", viewerRole: "survivor", now: new Date("2026-01-01T00:00:09.999Z") })).toBe(true);
+    expect(canViewSurvivorPing({ ...shared, viewerId: "teammate-a", viewerRole: "survivor", now: new Date("2026-01-01T00:00:10.001Z") })).toBe(false);
+    expect(canViewSurvivorPing({ ...shared, viewerId: "survivor-a", viewerRole: "survivor", now: new Date("2026-01-01T00:00:02.000Z") })).toBe(false);
   });
 
   it("uses a rounded-square boundary instead of a circular play area", () => {

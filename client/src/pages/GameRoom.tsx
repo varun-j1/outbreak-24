@@ -10,6 +10,7 @@ import { trpc } from "@/lib/trpc";
 
 type View = "map" | "activity" | "inventory";
 type Snapshot = any;
+type FieldAlert = { id: string; title: string; body: string; action?: "activity" };
 
 const formatClock = (seconds: number) => `${String(Math.max(0, Math.floor(seconds / 60))).padStart(2, "0")}:${String(Math.max(0, seconds % 60)).padStart(2, "0")}`;
 const timeValue = (value?: string | Date | null) => value ? new Date(value).getTime() : 0;
@@ -139,7 +140,7 @@ export default function GameRoom() {
   const [videoPromptOpen, setVideoPromptOpen] = useState(false);
   const [zombieEvidence, setZombieEvidence] = useState<any[]>([]);
   const [evidenceIndex, setEvidenceIndex] = useState(0);
-  const [urgentNotice, setUrgentNotice] = useState<{ title: string; body: string; action?: "activity" } | null>(null);
+  const [fieldAlerts, setFieldAlerts] = useState<FieldAlert[]>([]);
   const lastReportedRef = useRef(0);
   const knownClaimIdsRef = useRef<Set<string>>(new Set());
   const latestEventIdRef = useRef<string | null>(null);
@@ -147,6 +148,8 @@ export default function GameRoom() {
   const videoDeadlineWarningRef = useRef<string | null>(null);
   const shownEvidenceIdsRef = useRef<Set<string>>(new Set());
   const handledVideoDeadlineRef = useRef<string | null>(null);
+  const queueFieldAlert = (alert: FieldAlert) => setFieldAlerts(current => current.some(item => item.id === alert.id) ? current : [...current, alert].slice(-4));
+  const dismissFieldAlert = () => setFieldAlerts(current => current.slice(1));
   const utils = trpc.useUtils();
   const snapshot = trpc.game.snapshot.useQuery(safeSession, { enabled: !!session, refetchInterval: 1_500, refetchIntervalInBackground: true, retry: 1 });
   const data = snapshot.data as Snapshot | undefined;
@@ -194,37 +197,36 @@ export default function GameRoom() {
     if (newClaim) {
       setView("activity");
       tone("urgent"); buzz([140, 65, 140, 65, 180]);
-      setUrgentNotice({ title: "CAPTURE REVIEW REQUIRED", body: "A zombie submitted a photo. Review and confirm or dispute it now.", action: "activity" });
-      toast.error("CAPTURE REVIEW REQUIRED — confirm or dispute the new photo.", { duration: 10_000 });
+      queueFieldAlert({ id: `capture:${newClaim.id}`, title: "CAPTURE REVIEW REQUIRED", body: "A zombie submitted a photo. Review and confirm or dispute it now.", action: "activity" });
     }
   }, [data?.claims, session?.playerId]);
 
   useEffect(() => {
     const events = data?.events ?? [];
     if (!events.length) return;
-    if (!latestEventIdRef.current) { events.forEach((event: any) => { latestEventIdRef.current = event.id; }); return; }
+    if (!latestEventIdRef.current) { latestEventIdRef.current = events[0].id; return; }
     const latest = events[0];
     if (!latest || latest.id === latestEventIdRef.current) return;
     const alerts: Record<string, { buzz: number | number[]; tone: "ping" | "urgent" | "success" | "alert"; title: string; body: string }> = {
-      survivor_ping: { buzz: [30, 40, 30], tone: "ping", title: "OUTBREAK: 24", body: "Survivor pings are live. Track the last known locations." },
-      extraction_points_revealed: { buzz: [90, 55, 90, 55, 160], tone: "success", title: "OUTBREAK: 24", body: "Extraction points are now open." },
-      capture_requested: { buzz: [130, 60, 130], tone: "urgent", title: "OUTBREAK: 24", body: "Capture photo review required." },
-      capture_confirmed: { buzz: [80, 40, 80], tone: "alert", title: "OUTBREAK: 24", body: "A capture has been confirmed." },
-      powerup_spawned: { buzz: [45, 45, 45], tone: "success", title: "OUTBREAK: 24", body: "A team power drop has spawned." },
-      surroundings_video: { buzz: [35, 55, 35, 55, 100], tone: "urgent", title: "OUTBREAK: 24", body: "New survivor field video received." },
-      video_missed_ping: { buzz: [150, 50, 150], tone: "urgent", title: "OUTBREAK: 24", body: "A survivor missed their recording deadline; one last-location ping is live." },
-      player_turned: { buzz: [90, 40, 90, 40, 150], tone: "alert", title: "OUTBREAK: 24", body: "A survivor has turned infected." },
-      match_finished: { buzz: [180, 60, 180, 60, 260], tone: "success", title: "OUTBREAK: 24", body: "The match has ended. Check the result screen." },
-      storm_warning: { buzz: [50, 50, 50], tone: "alert", title: "OUTBREAK: 24", body: "Storm contraction warning." },
-      storm_contracting: { buzz: [70, 35, 70, 35, 120], tone: "alert", title: "OUTBREAK: 24", body: "The field boundary is contracting now." },
-      match_paused: { buzz: [80, 45, 80], tone: "alert", title: "OUTBREAK: 24", body: "The host has paused the game." },
-      match_resumed: { buzz: [35, 35, 80], tone: "success", title: "OUTBREAK: 24", body: "The host has resumed the game." },
-      match_stopped: { buzz: [200, 60, 200, 60, 260], tone: "urgent", title: "OUTBREAK: 24", body: "The host has stopped this game for everyone." },
-      lobby_cancelled: { buzz: [200, 60, 200, 60, 260], tone: "urgent", title: "OUTBREAK: 24", body: "The host cancelled this game." },
-      safety_pause: { buzz: [130, 50, 130], tone: "urgent", title: "OUTBREAK: 24", body: "The game is paused while a player location recovers." },
+      survivor_ping: { buzz: [30, 40, 30], tone: "ping", title: "SURVIVOR PING TRANSMITTED", body: "Last known survivor locations are available briefly. They are not live trackers." },
+      extraction_points_revealed: { buzz: [90, 55, 90, 55, 160], tone: "success", title: "EXTRACTIONS ARE OPEN", body: "Two extraction points are now live. Survivors can escape by holding an exit for 10 seconds." },
+      capture_requested: { buzz: [130, 60, 130], tone: "urgent", title: "CAPTURE REVIEW REQUIRED", body: "A capture photo needs a survivor response." },
+      capture_confirmed: { buzz: [80, 40, 80], tone: "alert", title: "SURVIVOR TURNING", body: "A capture was confirmed. The survivor is now converting to infected." },
+      powerup_spawned: { buzz: [45, 45, 45], tone: "success", title: "TEAM POWER-UP DEPLOYED", body: "A new power-up has spawned for your team. Open the map to claim it." },
+      surroundings_video: { buzz: [35, 55, 35, 55, 100], tone: "urgent", title: "SURVIVOR VIDEO RECEIVED", body: "A new surroundings video is ready in Infected Intel." },
+      video_missed_ping: { buzz: [150, 50, 150], tone: "urgent", title: "EXTRA LAST-LOCATION PING", body: "A survivor missed the recording deadline. One additional frozen location ping is live." },
+      player_turned: { buzz: [90, 40, 90, 40, 150], tone: "alert", title: "PLAYER TURNED INFECTED", body: "A survivor conversion is complete." },
+      match_finished: { buzz: [180, 60, 180, 60, 260], tone: "success", title: "MATCH COMPLETE", body: "The result screen and match recap are ready." },
+      storm_warning: { buzz: [50, 50, 50], tone: "alert", title: "ZONE SHRINK WARNING", body: `The field will shrink by ${Math.round(Number(latest.payload?.shrinkMeters ?? 0))} m in 30 seconds.` },
+      storm_contracting: { buzz: [70, 35, 70, 35, 120], tone: "alert", title: "ZONE IS SHRINKING", body: `The field is shrinking by ${Math.round(Number(latest.payload?.shrinkMeters ?? 0))} m now. Move inward.` },
+      match_paused: { buzz: [80, 45, 80], tone: "alert", title: "GAME PAUSED", body: "The host has paused the game." },
+      match_resumed: { buzz: [35, 35, 80], tone: "success", title: "GAME RESUMED", body: "The host has resumed the game." },
+      match_stopped: { buzz: [200, 60, 200, 60, 260], tone: "urgent", title: "HOST ENDED THE GAME", body: "The host has stopped this game for every player." },
+      lobby_cancelled: { buzz: [200, 60, 200, 60, 260], tone: "urgent", title: "HOST CANCELLED THE GAME", body: "The host cancelled this game." },
+      safety_pause: { buzz: [130, 50, 130], tone: "urgent", title: "SAFETY PAUSE", body: "The game is paused while a player location recovers." },
     };
     const alert = alerts[latest.type];
-    if (alert) { buzz(alert.buzz); tone(alert.tone); notify(alert.title, alert.body); toast(alert.body, { duration: 7_000 }); if (data?.viewer?.role === "survivor" && ["extraction_points_revealed", "storm_warning", "storm_contracting", "match_paused", "match_stopped", "lobby_cancelled", "safety_pause", "capture_confirmed"].includes(latest.type)) setUrgentNotice({ title: latest.type === "match_stopped" || latest.type === "lobby_cancelled" ? "HOST ENDED THE GAME" : "FIELD ALERT", body: alert.body }); }
+    if (alert) { buzz(alert.buzz); tone(alert.tone); notify(alert.title, alert.body); queueFieldAlert({ id: `event:${latest.id}`, title: alert.title, body: alert.body, action: latest.type === "capture_requested" ? "activity" : undefined }); }
     latestEventIdRef.current = latest.id;
   }, [data?.events]);
 
@@ -233,7 +235,7 @@ export default function GameRoom() {
     const seconds = Math.ceil((nextPingAt - Date.now()) / 1000);
     if (data?.game?.status === "running" && seconds > 0 && seconds <= 10 && pingWarningRef.current !== String(nextPingAt)) {
       pingWarningRef.current = String(nextPingAt);
-      buzz([25, 65, 25]); tone("ping"); notify("OUTBREAK: 24", `Survivor ping in ${seconds} seconds.`); toast("PING INCOMING — prepare for the last-location drop.", { duration: 5_000 });
+      buzz([25, 65, 25]); tone("ping"); notify("OUTBREAK: 24", `Survivor ping in ${seconds} seconds.`); queueFieldAlert({ id: `ping-warning:${nextPingAt}`, title: "PING INCOMING", body: `A survivor last-location ping transmits in ${seconds} seconds.` });
     }
   }, [data?.game?.nextPingAt, data?.game?.status]);
 
@@ -242,7 +244,7 @@ export default function GameRoom() {
     const seconds = Math.ceil((deadlineAt - Date.now()) / 1000);
     if (data?.viewer?.role === "survivor" && deadlineAt && seconds > 0 && seconds <= 10 && videoDeadlineWarningRef.current !== String(deadlineAt)) {
       videoDeadlineWarningRef.current = String(deadlineAt);
-      buzz([110, 50, 110]); tone("urgent"); notify("OUTBREAK: 24", `Upload your video within ${seconds} seconds or one extra last-location ping is sent.`); toast.error(`VIDEO DEADLINE — ${seconds} seconds before one extra ping.`);
+      buzz([110, 50, 110]); tone("urgent"); notify("OUTBREAK: 24", `Upload your video within ${seconds} seconds or one extra last-location ping is sent.`); queueFieldAlert({ id: `video-deadline:${deadlineAt}`, title: "VIDEO DEADLINE", body: `Record your 3-second field video within ${seconds} seconds. Missing it sends one extra frozen ping.` });
     }
   }, [data?.viewer?.videoUploadDeadlineAt, data?.viewer?.role]);
 
@@ -377,6 +379,7 @@ export default function GameRoom() {
             : viewer.role === "zombie"
               ? { title: "TRACK THE NEXT PING", note: pingIn ? `Survivor portrait pings arrive in ${formatClock(pingIn)}. Follow trails or take a capture photo.` : "A new survivor ping is being transmitted." }
               : { title: "STAY MOVING", note: `Exits unlock in ${formatClock(game.rules.extractionOpensAtSeconds - elapsed)}. Team power drops will appear on your map.` };
+  const activeFieldAlert = fieldAlerts[0];
 
   if (game.status === "setup") return <SetupScreen center={setupCenter} radius={setupInitialRadius} minRadius={setupMinimumRadius} matchMinutes={setupMatchMinutes} pingInterval={setupPingInterval} points={setupPoints} pointMode={pointMode} isHost={viewer.isHost} currentLocation={currentLocation} setCenter={setSetupCenter} setInitial={setSetupInitialRadius} setMinimum={setSetupMinimumRadius} setMatchMinutes={setSetupMatchMinutes} setPingInterval={setSetupPingInterval} setPointMode={setPointMode} setPoints={setSetupPoints} onMapClick={addPoint} onUseGps={requestLocation} onSave={saveSetup} onStop={stopMatch} busy={createSetup.isPending} />;
   if (game.status === "lobby") return <LobbyScreen game={game} viewer={viewer} players={data.players} locationGranted={locationGranted} cameraGranted={cameraGranted} permissionsBusy={permissionsBusy} onRequestPermissions={requestFieldPermissions} onReady={async () => { if (!locationGranted || !cameraGranted) { const granted = await requestFieldPermissions(); if (!granted) return; } await perform(() => setReady.mutateAsync({ ...safeSession, isReady: !player?.isReady })); }} onAssign={(playerId: string, isZombie: boolean) => perform(() => assignZombie.mutateAsync({ ...safeSession, playerId, isZombie }))} onStart={() => perform(() => openBriefing.mutateAsync(safeSession))} onStop={stopMatch} onCopy={() => copy(game.joinCode, "Join code")} recoveryCode={session.rejoinCode} onCopyRecovery={() => copy(session.rejoinCode, "Recovery code")} briefingOpen={Boolean(game.briefingOpenedAt)} onDismissBriefing={() => void perform(() => start.mutateAsync(safeSession))} />;
@@ -406,7 +409,7 @@ export default function GameRoom() {
     <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-[#09151a]/95 px-4 py-2 backdrop-blur-md"><div className="mx-auto flex max-w-md justify-around">{[["map", Map, "MAP"], ["activity", Activity, "ACTIVITY"], ["inventory", PackageOpen, "INVENTORY"]].map(([id, Icon, label]) => { const SelectedIcon = Icon as typeof Map; return <button key={String(id)} onClick={() => setView(id as View)} className={`grid min-w-22 place-items-center gap-1 rounded-xl px-4 py-2 text-[10px] font-black tracking-[0.12em] ${view === id ? "bg-teal-300/15 text-teal-200" : "text-slate-500"}`}><SelectedIcon size={20} />{String(label)}</button>; })}</div></nav>
     {videoPromptOpen && !mediaMode && <SurvivorVideoPrompt seconds={Math.max(0, Math.ceil((videoDeadlineAt - Date.now()) / 1000))} onDismiss={() => setVideoPromptOpen(false)} onRecord={() => { handledVideoDeadlineRef.current = String(videoDeadlineAt); setVideoPromptOpen(false); setMediaMode("video"); }} />}
     {viewer.role === "zombie" && zombieEvidence.length > 0 && <ZombieEvidenceModal evidence={zombieEvidence} index={Math.min(evidenceIndex, zombieEvidence.length - 1)} onClose={() => setZombieEvidence([])} onPrevious={() => setEvidenceIndex(index => (index - 1 + zombieEvidence.length) % zombieEvidence.length)} onNext={() => setEvidenceIndex(index => (index + 1) % zombieEvidence.length)} />}
-    {urgentNotice && <UrgentNotice title={urgentNotice.title} body={urgentNotice.body} onClose={() => setUrgentNotice(null)} onOpenActivity={urgentNotice.action === "activity" ? () => { setUrgentNotice(null); setView("activity"); } : undefined} />}
+    {activeFieldAlert && <UrgentNotice title={activeFieldAlert.title} body={activeFieldAlert.body} onClose={dismissFieldAlert} onOpenActivity={activeFieldAlert.action === "activity" ? () => { dismissFieldAlert(); setView("activity"); } : undefined} />}
     {mediaMode && <MediaCapture mode={mediaMode} targetName={captureTarget?.name} onClose={() => { setMediaMode(null); setCaptureTarget(null); }} onComplete={blob => { void uploadMedia(blob, mediaMode); }} />}
   </main>;
 }

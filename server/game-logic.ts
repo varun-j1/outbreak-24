@@ -19,6 +19,7 @@ export const DEFAULT_RULES = {
 
 export type GameRules = typeof DEFAULT_RULES;
 export type Coordinate = { lat: number; lng: number };
+export const SURVIVOR_TEAM_PING_SECONDS = 10;
 export type RecapPlayer = { id: string; displayName: string; role: string; status: string };
 export type RecapClaim = { id: string; zombiePlayerId: string; targetPlayerId: string; status: string; resolution: string | null; createdAt: Date; resolvedAt: Date | null };
 
@@ -129,6 +130,28 @@ export function effectiveStormRadius(game: { currentRadius: number; minimumRadiu
   const phaseStartedAt = game.stormPhaseEndsAt.getTime() - 30_000;
   const progress = Math.min(1, Math.max(0, (now.getTime() - phaseStartedAt) / 30_000));
   return Math.max(game.minimumRadius, game.currentRadius * (1 - 0.15 * progress));
+}
+
+/** Returns the announced distance by which the next storm contraction reduces the half-width. */
+export function stormShrinkMeters(currentRadius: number, minimumRadius: number) {
+  return Math.max(0, Math.round(currentRadius - Math.max(minimumRadius, currentRadius * 0.85)));
+}
+
+/** Zombie pings use their server expiry; survivor teammates see a brief ten-second confirmation only. */
+export function canViewSurvivorPing(input: {
+  viewerId: string;
+  viewerRole: string;
+  targetId: string;
+  targetRole: string;
+  pingedAt: Date | null;
+  expiresAt: Date | null;
+  now?: Date;
+}) {
+  const now = input.now ?? new Date();
+  if (input.targetRole !== "survivor" || input.targetId === input.viewerId || !input.pingedAt) return false;
+  if (input.viewerRole === "zombie") return Boolean(input.expiresAt && input.expiresAt > now);
+  if (input.viewerRole === "survivor") return now.getTime() - input.pingedAt.getTime() <= SURVIVOR_TEAM_PING_SECONDS * 1_000;
+  return false;
 }
 
 export function markerPositionWithinBounds(center: Coordinate, point: Coordinate, radiusMeters: number, paddingMeters = 0): boolean {
