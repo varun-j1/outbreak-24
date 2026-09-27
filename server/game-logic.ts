@@ -25,6 +25,11 @@ export const SURVIVOR_TEAM_PING_SECONDS = 10;
 export type RecapPlayer = { id: string; displayName: string; role: string; status: string };
 export type RecapClaim = { id: string; zombiePlayerId: string; targetPlayerId: string; status: string; resolution: string | null; createdAt: Date; resolvedAt: Date | null };
 
+/** A final confirmed capture resolves immediately instead of leaving the winner waiting for a turn timer. */
+export function isFinalSurvivorCapture(players: Array<{ id: string; role: string; status: string }>, capturedPlayerId: string) {
+  return !players.some(player => player.id !== capturedPlayerId && player.role === "survivor" && (player.status === "active" || player.status === "turning"));
+}
+
 /** Match outcomes are derived from authoritative player and resolved-claim records. */
 export function buildMatchRecap(players: RecapPlayer[], claims: RecapClaim[]) {
   const names = new Map(players.map(player => [player.id, player.displayName]));

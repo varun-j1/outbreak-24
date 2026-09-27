@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMatchRecap, canViewSurvivorPing, deriveRules, distanceToSegmentMeters, effectiveStormRadius, headStartRemainingSeconds, metersBetween, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds, shouldExposeCamper, stormShrinkMeters } from "./game-logic";
+import { buildMatchRecap, canViewSurvivorPing, deriveRules, distanceToSegmentMeters, effectiveStormRadius, headStartRemainingSeconds, isFinalSurvivorCapture, metersBetween, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds, shouldExposeCamper, stormShrinkMeters } from "./game-logic";
 
 describe("game rule utilities", () => {
   it("measures short outdoor distances", () => {
@@ -98,5 +98,15 @@ describe("game rule utilities", () => {
     ]);
     expect(recap.totals).toMatchObject({ captures: 1, infected: 2, escaped: 1, forfeited: 1, survivorsRemaining: 0 });
     expect(recap.captures[0]).toMatchObject({ zombieName: "Raven", survivorName: "Nova" });
+  });
+
+  it("ends the match immediately when a confirmed capture removes the final survivor", () => {
+    const players = [
+      { id: "z1", role: "zombie", status: "active" },
+      { id: "s1", role: "survivor", status: "active" },
+    ];
+    expect(isFinalSurvivorCapture(players, "s1")).toBe(true);
+    expect(isFinalSurvivorCapture([...players, { id: "s2", role: "survivor", status: "turning" }], "s1")).toBe(false);
+    expect(isFinalSurvivorCapture([...players, { id: "s2", role: "survivor", status: "escaped" }], "s1")).toBe(true);
   });
 });

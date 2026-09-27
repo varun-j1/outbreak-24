@@ -12,7 +12,7 @@ import {
   InsertUser,
   users,
 } from "../drizzle/schema";
-import { DEFAULT_RULES, buildMatchRecap, canViewSurvivorPing, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, headStartRemainingSeconds, metersBetween, parseRules, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds, shouldExposeCamper, stormShrinkMeters } from "./game-logic";
+import { DEFAULT_RULES, buildMatchRecap, canViewSurvivorPing, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, headStartRemainingSeconds, isFinalSurvivorCapture, metersBetween, parseRules, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds, shouldExposeCamper, stormShrinkMeters } from "./game-logic";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -323,12 +323,14 @@ async function tickGameOnce(gameId: string) {
     await addEvent(game.id, "safety_pause", null, null, "public", { reason: "location_stale" });
     return;
   }
-  for (const player of players.filter(player => player.status === "turning" && player.turnEndsAt && player.turnEndsAt <= now)) {
+  const turningPlayers = players.filter(player => player.status === "turning" && player.turnEndsAt && player.turnEndsAt <= now);
+  for (const player of turningPlayers) {
     await db.update(gamePlayers).set({ role: "zombie", status: "active", inventory: null, videoSkipArmed: false, turnEndsAt: null }).where(eq(gamePlayers.id, player.id));
     await addEvent(game.id, "player_turned", player.id, null, "public", { name: player.displayName });
   }
-  const survivors = players.filter(player => player.role === "survivor" && player.status === "active");
-  const remainingSurvivors = players.filter(player => player.role === "survivor" && (player.status === "active" || player.status === "turning"));
+  const resolvedPlayers = turningPlayers.length ? await db.select().from(gamePlayers).where(eq(gamePlayers.gameId, game.id)) : players;
+  const survivors = resolvedPlayers.filter(player => player.role === "survivor" && player.status === "active");
+  const remainingSurvivors = resolvedPlayers.filter(player => player.role === "survivor" && (player.status === "active" || player.status === "turning"));
   if (!remainingSurvivors.length) {
     await db.update(games).set({ status: "finished", winner: "zombies", finishedAt: now }).where(eq(games.id, game.id));
     await addEvent(game.id, "match_finished", null, null, "public", { winner: "zombies", reason: "no_survivors" });
@@ -441,13 +443,15 @@ export async function reportLocation(session: GuestSession, location: { lat: num
     { lat: game.centerLat, lng: game.centerLng },
     current,
     effectiveStormRadius(game, now),
-    -Math.max(10, location.accuracy || 0),
+    0,
   );
   let boundaryOutsideSince = player.boundaryOutsideSince;
   let boundaryExposed = player.boundaryExposed;
   let status: "active" | "forfeited" = player.status;
   if (!safelyInside) {
+    const justLeftBoundary = !boundaryOutsideSince;
     boundaryOutsideSince ??= now;
+    if (justLeftBoundary) await addEvent(game.id, "boundary_left", player.id, player.id, "target", { name: player.displayName, graceSeconds: rules.boundaryGraceSeconds, forfeitSeconds: rules.boundaryForfeitSeconds });
     const outsideSeconds = (now.getTime() - boundaryOutsideSince.getTime()) / 1000;
     boundaryExposed = outsideSeconds >= rules.boundaryGraceSeconds;
     if (outsideSeconds >= rules.boundaryForfeitSeconds) {
@@ -455,6 +459,7 @@ export async function reportLocation(session: GuestSession, location: { lat: num
       await addEvent(game.id, "boundary_forfeit", player.id, null, "public", { name: player.displayName });
     }
   } else {
+    if (boundaryOutsideSince) await addEvent(game.id, "boundary_returned", player.id, player.id, "target", { name: player.displayName });
     boundaryOutsideSince = null;
     boundaryExposed = false;
   }
@@ -576,15 +581,22 @@ export async function resolveCapture(session: GuestSession, claimId: string, res
   }
   await db.update(gameCaptureClaims).set({ status: "resolved", resolution: capture ? "capture" : "dismissed", resolvedAt: now }).where(eq(gameCaptureClaims.id, claim.id));
   if (capture) {
+    const players = await db.select({ id: gamePlayers.id, role: gamePlayers.role, status: gamePlayers.status }).from(gamePlayers).where(eq(gamePlayers.gameId, session.gameId));
+    const finalCapture = isFinalSurvivorCapture(players, claim.targetPlayerId);
     await db.update(gamePlayers).set({
-      role: "survivor",
-      status: "turning",
-      turnEndsAt: new Date(now.getTime() + DEFAULT_RULES.captureTurnSeconds * 1000),
+      role: finalCapture ? "zombie" : "survivor",
+      status: finalCapture ? "active" : "turning",
+      turnEndsAt: finalCapture ? null : new Date(now.getTime() + DEFAULT_RULES.captureTurnSeconds * 1000),
       inventory: null,
       videoSkipArmed: false,
     }).where(eq(gamePlayers.id, claim.targetPlayerId));
     await db.update(games).set({ lastCaptureAt: now }).where(eq(games.id, session.gameId));
     await addEvent(session.gameId, "capture_confirmed", claim.zombiePlayerId, claim.targetPlayerId, "public", { turnSeconds: DEFAULT_RULES.captureTurnSeconds });
+    if (finalCapture) {
+      await addEvent(session.gameId, "player_turned", claim.targetPlayerId, null, "public", {});
+      await db.update(games).set({ status: "finished", winner: "zombies", finishedAt: now, pausedAt: null }).where(eq(games.id, session.gameId));
+      await addEvent(session.gameId, "match_finished", null, null, "public", { winner: "zombies", reason: "final_capture" });
+    }
   } else {
     await addEvent(session.gameId, "capture_dismissed", player.id, claim.zombiePlayerId, "public", {});
   }

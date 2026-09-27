@@ -1,6 +1,6 @@
 import L, { type LayerGroup, type Map as LeafletMap, type Marker, type Polygon } from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { Compass, Crosshair, Footprints, MapPinned, Navigation, Route as RouteIcon, X, ZoomIn, ZoomOut } from "lucide-react";
+import { Crosshair, Footprints, MapPinned, Route as RouteIcon, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fieldHaptic as haptic, playFieldCue } from "@/lib/field-feedback";
 
@@ -35,7 +35,7 @@ function escaped(value: string) {
   return value.replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char] ?? char);
 }
 
-function makeIcon(kind: "self" | "snapshot" | "point" | "item", label: string, profileImageUrl?: string | null, role?: string, compact = false, heading?: number | null) {
+function makeIcon(kind: "self" | "snapshot" | "point" | "item", label: string, profileImageUrl?: string | null, role?: string, compact = false, movementHeading?: number | null) {
   let html = "";
   let iconSize: [number, number] = [44, 32];
   let iconAnchor: [number, number] = [22, 16];
@@ -47,7 +47,7 @@ function makeIcon(kind: "self" | "snapshot" | "point" | "item", label: string, p
       : `<div class="mapbox-field__ping ${role === "zombie" ? "mapbox-field__ping--zombie" : ""}"><div class="mapbox-field__portrait">${portrait}</div><div><b>${escaped(name)}</b><small>${escaped(detail ?? "LAST PING")}</small></div></div>`;
     iconSize = compact ? [34, 34] : [158, 45]; iconAnchor = compact ? [17, 17] : [79, 45];
   } else if (kind === "self") {
-    html = `<div class="mapbox-field__self-wrap">${heading === null || heading === undefined ? "" : `<span class="mapbox-field__heading" style="transform:rotate(${heading}deg)" aria-hidden="true">▲</span>`}<div class="mapbox-field__self ${role === "zombie" ? "mapbox-field__self--zombie" : ""}">${profileImageUrl ? `<img src="${escaped(profileImageUrl)}" alt="Your location" />` : `<span>${escaped(label.slice(0, 1).toUpperCase())}</span>`}</div></div>`;
+    html = `<div class="mapbox-field__self-wrap">${movementHeading === null || movementHeading === undefined ? "" : `<span class="mapbox-field__heading" style="transform:rotate(${movementHeading}deg)" aria-hidden="true">▲</span>`}<div class="mapbox-field__self ${role === "zombie" ? "mapbox-field__self--zombie" : ""}">${profileImageUrl ? `<img src="${escaped(profileImageUrl)}" alt="Player location" />` : `<span>${escaped(label.slice(0, 1).toUpperCase())}</span>`}</div></div>`;
     iconSize = [38, 38]; iconAnchor = [19, 19];
   } else if (kind === "item") {
     html = `<div class="mapbox-field__item mapbox-field__item--${role}"><b>${role === "zombie" ? "☣" : "✦"}</b><span>${role === "zombie" ? "INFECTED" : "SURVIVOR"}<small>${escaped(label)}</small></span></div>`;
@@ -70,6 +70,12 @@ function bearingDegrees(from: Coordinate, to: Coordinate) {
   const y = Math.sin(longitude) * Math.cos(radians(to.lat));
   const x = Math.cos(radians(from.lat)) * Math.sin(radians(to.lat)) - Math.sin(radians(from.lat)) * Math.cos(radians(to.lat)) * Math.cos(longitude);
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+function movementDistanceMeters(from: Coordinate, to: Coordinate) {
+  const latitudeMeters = (to.lat - from.lat) * 111_320;
+  const longitudeMeters = (to.lng - from.lng) * 111_320 * Math.cos((from.lat * Math.PI) / 180);
+  return Math.hypot(latitudeMeters, longitudeMeters);
 }
 
 function offsetCoordinate(center: Coordinate, xMeters: number, yMeters: number): [number, number] {
@@ -128,30 +134,38 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
   const initialBoundsRef = useRef(false);
   const setupFocusRef = useRef(false);
   const centerRef = useRef<string>("");
-  const orientationHandlerRef = useRef<((event: DeviceOrientationEvent & { webkitCompassHeading?: number }) => void) | null>(null);
+  const previousPositionsRef = useRef(new Map<string, Coordinate>());
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState("");
   const [labels, setLabels] = useState<Record<string, string>>({});
   const [routeTargetId, setRouteTargetId] = useState<string | null>(null);
   const [routeState, setRouteState] = useState<RouteState | null>(null);
-  const [heading, setHeading] = useState<number | null>(null);
-  const [orientationEnabled, setOrientationEnabled] = useState(false);
+  const [movementHeadings, setMovementHeadings] = useState<Record<string, number>>({});
 
   const selfPlayer = players.find(player => player.id === currentPlayerId);
   const snapshotPlayers = useMemo(() => players.filter(player => player.positionKind === "snapshot" && player.lat !== null && player.lng !== null), [players]);
   const livePlayers = useMemo(() => players.filter(player => player.id !== currentPlayerId && player.positionKind === "live" && player.lat !== null && player.lng !== null), [players, currentPlayerId]);
   const routeCandidates = useMemo(() => selfPlayer?.role === "zombie" ? snapshotPlayers : [], [selfPlayer?.role, snapshotPlayers]);
   const ownPosition = currentLocation ?? (selfPlayer?.lat !== null && selfPlayer?.lat !== undefined && selfPlayer.lng !== null && selfPlayer.lng !== undefined ? { lat: selfPlayer.lat, lng: selfPlayer.lng } : null);
-  const directionTarget = routeCandidates[0];
-  const routeTarget = routeCandidates.find(player => player.id === routeTargetId) ?? directionTarget;
+  const routeTarget = routeCandidates.find(player => player.id === routeTargetId) ?? routeCandidates[0];
   const routeTargetPingAt = pingTimestamp(routeTarget);
   const routeNeedsRefresh = Boolean(routeState && routeTarget && routeState.targetId === routeTarget.id && routeTargetPingAt > routeState.sourcePingAt);
-  const directionBearing = ownPosition && directionTarget?.lat !== null && directionTarget?.lat !== undefined && directionTarget.lng !== null && directionTarget.lng !== undefined ? bearingDegrees(ownPosition, { lat: directionTarget.lat, lng: directionTarget.lng }) : null;
   const fallbackImage = useMemo(() => MAPBOX_TOKEN ? `https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/${center.lng},${center.lat},15/1280x800?access_token=${encodeURIComponent(MAPBOX_TOKEN)}` : "", [center.lat, center.lng]);
   useEffect(() => { clickRef.current = onMapClick; }, [onMapClick]);
-  useEffect(() => () => {
-    if (orientationHandlerRef.current) window.removeEventListener("deviceorientation", orientationHandlerRef.current, true);
-  }, []);
+
+  useEffect(() => {
+    const observed = [
+      ...livePlayers.map(player => ({ id: player.id, position: { lat: player.lat!, lng: player.lng! } })),
+      ...(ownPosition ? [{ id: currentPlayerId, position: ownPosition }] : []),
+    ];
+    const updates: Record<string, number> = {};
+    observed.forEach(({ id, position }) => {
+      const previous = previousPositionsRef.current.get(id);
+      if (previous && movementDistanceMeters(previous, position) >= 3) updates[id] = Math.round(bearingDegrees(previous, position));
+      previousPositionsRef.current.set(id, position);
+    });
+    if (Object.keys(updates).length) setMovementHeadings(current => ({ ...current, ...updates }));
+  }, [livePlayers, ownPosition, currentPlayerId]);
 
   useEffect(() => {
     setRouteTargetId(current => routeCandidates.some(player => player.id === current) ? current : routeCandidates[0]?.id ?? null);
@@ -232,10 +246,12 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
       next.set(`ping:${player.id}`, { position: { lat: player.lat!, lng: player.lng! }, signature: `ping:${player.profileImageUrl ?? ""}:${player.name}:${location}:${player.lat!.toFixed(6)}:${player.lng!.toFixed(6)}:${player.role}:${compact}`, icon: makeIcon("snapshot", `${player.name} · LAST PING near ${location}`, player.profileImageUrl, player.role, compact) });
     });
     livePlayers.forEach(player => {
-      next.set(`live:${player.id}`, { position: { lat: player.lat!, lng: player.lng! }, signature: `live:${player.profileImageUrl ?? ""}:${player.name}:${player.lat!.toFixed(6)}:${player.lng!.toFixed(6)}:${player.role}`, icon: makeIcon("self", player.name, player.profileImageUrl, player.role) });
+      const movementHeading = movementHeadings[player.id];
+      next.set(`live:${player.id}`, { position: { lat: player.lat!, lng: player.lng! }, signature: `live:${player.profileImageUrl ?? ""}:${player.name}:${player.lat!.toFixed(6)}:${player.lng!.toFixed(6)}:${player.role}:${movementHeading ?? ""}`, icon: makeIcon("self", player.name, player.profileImageUrl, player.role, false, movementHeading) });
     });
     if (ownPosition) {
-      next.set("self", { position: ownPosition, signature: `self:${selfPlayer?.profileImageUrl ?? ""}:${selfPlayer?.name ?? "YOU"}:${ownPosition.lat.toFixed(6)}:${ownPosition.lng.toFixed(6)}:${selfPlayer?.role ?? "survivor"}:${heading ?? ""}`, icon: makeIcon("self", selfPlayer?.name ?? "YOU", selfPlayer?.profileImageUrl, selfPlayer?.role ?? "survivor", false, heading) });
+      const movementHeading = movementHeadings[currentPlayerId];
+      next.set("self", { position: ownPosition, signature: `self:${selfPlayer?.profileImageUrl ?? ""}:${selfPlayer?.name ?? "YOU"}:${ownPosition.lat.toFixed(6)}:${ownPosition.lng.toFixed(6)}:${selfPlayer?.role ?? "survivor"}:${movementHeading ?? ""}`, icon: makeIcon("self", selfPlayer?.name ?? "YOU", selfPlayer?.profileImageUrl, selfPlayer?.role ?? "survivor", false, movementHeading) });
     }
     markersRef.current.forEach((record, key) => { if (!next.has(key)) { markerLayer.removeLayer(record.marker); markersRef.current.delete(key); } });
     next.forEach((definition, key) => {
@@ -249,7 +265,7 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
         existing.signature = definition.signature;
       }
     });
-  }, [points, items, snapshotPlayers, livePlayers, selfPlayer, ownPosition, labels, mapReady, heading]);
+  }, [points, items, snapshotPlayers, livePlayers, selfPlayer, ownPosition, labels, mapReady, movementHeadings, currentPlayerId]);
 
   useEffect(() => {
     const trailLayer = trailLayerRef.current;
@@ -290,26 +306,6 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
     haptic(12);
   }, [center, ownPosition, radius]);
   const zoom = (delta: number) => { mapRef.current?.setZoom((mapRef.current.getZoom() ?? 15) + delta, { animate: true }); haptic(8); };
-  const enableOrientation = async () => {
-    try {
-      const DeviceOrientation = window.DeviceOrientationEvent as typeof DeviceOrientationEvent & { requestPermission?: () => Promise<"granted" | "denied"> };
-      if (typeof DeviceOrientation.requestPermission === "function" && await DeviceOrientation.requestPermission() !== "granted") throw new Error("denied");
-      if (orientationHandlerRef.current) window.removeEventListener("deviceorientation", orientationHandlerRef.current, true);
-      const onOrientation = (event: DeviceOrientationEvent & { webkitCompassHeading?: number }) => {
-        const nativeHeading = event.webkitCompassHeading;
-        const alpha = event.alpha;
-        const next = typeof nativeHeading === "number" ? nativeHeading : typeof alpha === "number" ? (360 - alpha + 360) % 360 : null;
-        if (next !== null) setHeading(Math.round(next));
-      };
-      orientationHandlerRef.current = onOrientation;
-      window.addEventListener("deviceorientation", onOrientation, true);
-      setOrientationEnabled(true);
-      haptic([10, 22, 10]); playFieldCue("route");
-    } catch {
-      setOrientationEnabled(false);
-      haptic([55, 25, 55]); playFieldCue("alert");
-    }
-  };
   const buildRoute = async () => {
     if (!routeTarget || !ownPosition || !MAPBOX_TOKEN) {
       setRouteState({ targetId: routeTarget?.id ?? "", coordinates: [], distanceMeters: 0, durationSeconds: 0, sourcePingAt: routeTargetPingAt, error: "Location is needed before a route can be built." });
@@ -338,10 +334,9 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
     {fallbackImage && <img src={fallbackImage} className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover" alt="Mapbox street map fallback" onError={() => setMapError("Mapbox street imagery could not be reached. Check the network and token domain settings.")} />}
     <div ref={containerRef} className="absolute inset-0 z-[1]" aria-label="Interactive two-dimensional field map" />
     <div className="pointer-events-none absolute inset-x-4 top-4 z-10 flex items-start justify-between gap-3"><div className="rounded-xl border border-teal-300/30 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.12em] text-teal-100 shadow-lg"><span className="block text-[9px] text-slate-400">FIELD MAP</span>2D STREET DETAIL</div>{mapError && <div className="max-w-xs rounded-xl border border-amber-300/50 bg-[#071116]/95 px-3 py-2 text-xs font-bold text-amber-100">{mapError}</div>}</div>
-    {directionBearing !== null && <div className="pointer-events-none absolute right-4 top-16 z-10 flex items-center gap-2 rounded-xl border border-[#ff455c]/35 bg-[#071116]/92 px-2.5 py-2 text-[10px] font-black tracking-[.08em] text-[#ffb0ba]"><Navigation size={20} className="text-[#ff455c]" style={{ transform: `rotate(${directionBearing}deg)` }} fill="currentColor" /><span>LAST PING<br />{directionTarget.name.toUpperCase()}</span></div>}
     {routeTarget && ownPosition && <div className="absolute bottom-4 left-4 z-20 max-w-[min(19rem,calc(100%-5.5rem))] rounded-xl border border-[#f5cb55]/50 bg-[#071116]/95 p-2.5 shadow-xl"><div className="flex items-center gap-2"><div className="grid h-8 w-8 place-items-center rounded-lg bg-[#f5cb55] text-[#071116]"><Footprints size={17} /></div><div className="min-w-0 flex-1"><div className="truncate text-[10px] font-black tracking-[.1em] text-[#f9e29a]">LAST PING · {routeTarget.name.toUpperCase()}</div><div className="text-[10px] font-bold text-slate-400">{routeNeedsRefresh ? "NEWER PING AVAILABLE" : routeIsCurrent && !routeState?.loading && !routeState?.error ? `${formatRouteDistance(routeState.distanceMeters)} · ${formatRouteDuration(routeState.durationSeconds)}` : "Walking route from your location"}</div></div></div>{routeCandidates.length > 1 && <div className="mt-2 flex gap-1 overflow-x-auto pb-0.5">{routeCandidates.map(player => <button key={player.id} onClick={() => { setRouteTargetId(player.id); setRouteState(null); haptic(10); }} className={`whitespace-nowrap rounded-md px-2 py-1 text-[9px] font-black ${player.id === routeTarget.id ? "bg-[#f5cb55] text-[#071116]" : "bg-white/10 text-slate-300"}`}>{player.name}</button>)}</div>}{routeNeedsRefresh && <div className="mt-2 rounded-lg border border-[#f5cb55]/35 bg-[#f5cb55]/10 px-2 py-1.5 text-[9px] font-black tracking-[.08em] text-[#f9e29a]">A NEWER LAST-LOCATION PING ARRIVED. YOUR CURRENT ROUTE IS UNCHANGED.</div>}<div className="mt-2 flex gap-2"><button onClick={() => void buildRoute()} disabled={routeState?.loading} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#f5cb55] px-3 py-2 text-[10px] font-black text-[#071116] disabled:opacity-60"><RouteIcon size={14} />{routeState?.loading ? "ROUTING…" : routeNeedsRefresh ? "REFRESH TO NEW PING" : routeIsCurrent ? "RECALCULATE ROUTE" : "ROUTE TO PING"}</button>{routeIsCurrent && <button onClick={() => { setRouteState(null); haptic(10); }} className="grid h-8 w-8 place-items-center rounded-lg bg-white/10 text-slate-200" aria-label="Clear route"><X size={15} /></button>}</div>{routeIsCurrent && routeState?.error && <p className="mt-2 text-[10px] font-bold text-[#ff9ba8]">{routeState.error}</p>}</div>}
     {minimumRadius && onMapClick && <div className="pointer-events-none absolute bottom-4 left-4 z-10 rounded-xl border border-[#f5cb55]/40 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.1em] text-[#f9e29a]">DASHED ROUNDED SQUARE · MINIMUM {Math.round(minimumRadius)} M</div>}
-    <div className="absolute bottom-4 right-4 z-20 grid gap-2"><button onClick={() => void enableOrientation()} className={`field-map__control ${orientationEnabled ? "field-map__control--active" : ""}`} aria-label="Enable heading pointer" title="Enable heading pointer"><Compass size={19} /></button><button onClick={() => zoom(1)} className="field-map__control" aria-label="Zoom in"><ZoomIn size={19} /></button><button onClick={() => zoom(-1)} className="field-map__control" aria-label="Zoom out"><ZoomOut size={19} /></button><button onClick={recenter} className="field-map__control" aria-label="Recenter map"><Crosshair size={19} /></button></div>
+    <div className="absolute bottom-4 right-4 z-20 grid gap-2"><button onClick={() => zoom(1)} className="field-map__control" aria-label="Zoom in"><ZoomIn size={19} /></button><button onClick={() => zoom(-1)} className="field-map__control" aria-label="Zoom out"><ZoomOut size={19} /></button><button onClick={recenter} className="field-map__control" aria-label="Recenter map"><Crosshair size={19} /></button></div>
     {!mapReady && <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center bg-[#071116]/45 text-center"><MapPinned className="mx-auto mb-3 animate-pulse text-teal-200" /><div className="text-xs font-black tracking-[0.16em] text-teal-100">LOADING FIELD MAP</div></div>}
   </div>;
 }
