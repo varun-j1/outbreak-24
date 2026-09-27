@@ -50,6 +50,23 @@ function useLocalClock(start: number) {
   return now - start;
 }
 
+function HeadStartCountdown({ role, seconds, playerName, onEnableAudio }: { role: string; seconds: number; playerName: string; onEnableAudio: () => void }) {
+  const survivor = role === "survivor";
+  const elapsed = Math.max(0, 45 - seconds);
+  const progress = Math.min(100, (elapsed / 45) * 100);
+  const secondsLabel = seconds === 1 ? "SECOND" : "SECONDS";
+  return <main className={`relative isolate grid min-h-screen overflow-hidden px-5 py-6 text-slate-100 ${survivor ? "bg-[#06151a]" : "bg-[#180a0f]"}`}>
+    <div aria-hidden className={`absolute -left-28 -top-32 h-80 w-80 rounded-full blur-3xl ${survivor ? "bg-teal-300/15" : "bg-[#ff455c]/20"}`} />
+    <div aria-hidden className={`absolute -bottom-48 -right-20 h-96 w-96 rounded-full blur-3xl ${survivor ? "bg-[#0a8190]/20" : "bg-amber-300/10"}`} />
+    <div className="relative z-10 mx-auto flex w-full max-w-xl flex-col justify-between">
+      <header className="flex items-center justify-between gap-4"><div className="flex items-center gap-3"><div className={`grid h-11 w-11 place-items-center rounded-2xl ${survivor ? "bg-teal-300 text-[#071116]" : "bg-[#ff455c] text-[#071116]"}`}>{survivor ? <Compass size={22} /> : <ShieldAlert size={22} />}</div><div><div className={`text-[10px] font-black tracking-[.18em] ${survivor ? "text-teal-200" : "text-[#ff9ba8]"}`}>{survivor ? "SURVIVOR START WINDOW" : "INFECTED HOLD"}</div><div className="mt-1 text-xs font-bold text-slate-400">OUTBREAK: 24 · {playerName.toUpperCase()}</div></div></div><button onClick={onEnableAudio} className="rounded-xl border border-white/15 bg-black/15 px-3 py-2 text-[10px] font-black tracking-[.11em] text-slate-200 active:scale-[.98]">ENABLE SOUND</button></header>
+      <section className="py-10 sm:py-16"><div className={`mb-5 inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[10px] font-black tracking-[.15em] ${survivor ? "border-teal-300/35 bg-teal-300/10 text-teal-100" : "border-[#ff455c]/40 bg-[#ff455c]/10 text-[#ff9ba8]"}`}><Radio size={13} className="animate-pulse" />MATCH LIVE · HEAD START ACTIVE</div><h1 className="max-w-md text-5xl font-black leading-[.88] tracking-[-.06em] sm:text-7xl">{survivor ? <>RUN.<br /><span className="text-teal-300">CREATE DISTANCE.</span></> : <>DON&apos;T<br /><span className="text-[#ff455c]">MOVE.</span></>}</h1><p className="mt-6 max-w-md text-base font-semibold leading-7 text-slate-300 sm:text-lg">{survivor ? "Create as much distance as you can. Zombies are locked out while your head start runs." : "Survivors have a head start. Your routes, trails, and capture tools unlock when this timer reaches zero."}</p></section>
+      <section className={`rounded-[1.75rem] border p-5 shadow-2xl ${survivor ? "border-teal-300/25 bg-[#0a2025]/85" : "border-[#ff455c]/30 bg-[#240c12]/85"}`}><div className="flex items-end justify-between gap-3"><div><div className={`text-[10px] font-black tracking-[.16em] ${survivor ? "text-teal-200" : "text-[#ff9ba8]"}`}>{survivor ? "ZOMBIES BEGIN HUNTING YOU IN" : "CHASE UNLOCKS IN"}</div><div className="mt-2 font-mono text-6xl font-black tracking-[-.08em] text-white sm:text-7xl">{formatClock(seconds)}</div></div><div className={`mb-2 grid h-11 w-11 place-items-center rounded-2xl ${survivor ? "bg-teal-300/15 text-teal-200" : "bg-[#ff455c]/15 text-[#ff9ba8]"}`}><Timer size={23} /></div></div><div className="mt-5 h-2 overflow-hidden rounded-full bg-black/30"><div className={`h-full rounded-full transition-[width] duration-700 ease-out ${survivor ? "bg-teal-300" : "bg-[#ff455c]"}`} style={{ width: `${progress}%` }} /></div><div className="mt-3 flex justify-between text-[10px] font-bold tracking-[.1em] text-slate-500"><span>{elapsed === 0 ? "START" : `${elapsed}s ELAPSED`}</span><span>{seconds} {secondsLabel} LEFT</span></div></section>
+      <footer className="mt-6 rounded-2xl border border-white/10 bg-black/10 p-4"><div className="flex gap-3"><div className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-xl ${survivor ? "bg-teal-300/10 text-teal-200" : "bg-[#ff455c]/10 text-[#ff9ba8]"}`}>{survivor ? <Play size={15} /> : <ScanLine size={15} />}</div><p className="text-xs font-semibold leading-5 text-slate-400">{survivor ? "Keep moving. Staying within a 15 m area for 30 seconds exposes your live position briefly." : "Use this time to plan. The first frozen survivor location ping broadcasts one minute after the match begins."}</p></div></footer>
+    </div>
+  </main>;
+}
+
 function MediaCapture({ mode, targetName, onClose, onComplete }: { mode: "photo" | "video"; targetName?: string; onClose: () => void; onComplete: (blob: Blob) => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -151,6 +168,7 @@ export default function GameRoom() {
   const videoDeadlineWarningRef = useRef<string | null>(null);
   const shownEvidenceIdsRef = useRef<Set<string>>(new Set());
   const handledVideoDeadlineRef = useRef<string | null>(null);
+  const headStartCueRef = useRef<number | null>(null);
   const queueFieldAlert = (alert: FieldAlert) => setFieldAlerts(current => current.some(item => item.id === alert.id) ? current : [...current, alert].slice(-4));
   const dismissFieldAlert = () => setFieldAlerts(current => current.slice(1));
   const utils = trpc.useUtils();
@@ -296,6 +314,23 @@ export default function GameRoom() {
     });
   }, [data?.events, data?.media, data?.viewer?.role]);
 
+  useEffect(() => {
+    const game = data?.game;
+    if (!game?.startedAt || game.status !== "running") { headStartCueRef.current = null; return; }
+    const elapsed = Math.max(0, Math.floor((fieldNow - timeValue(game.startedAt)) / 1_000) - game.pausedSeconds);
+    const seconds = Math.max(0, game.rules.headStartSeconds - elapsed);
+    if (seconds <= 0) {
+      if (headStartCueRef.current !== 0) { buzz([90, 35, 90, 35, 180]); tone("success"); headStartCueRef.current = 0; }
+      return;
+    }
+    const cue = seconds <= 5 || seconds % 5 === 0 ? seconds : null;
+    if (cue !== null && cue !== headStartCueRef.current) {
+      buzz(seconds <= 5 ? [75, 35, 75] : 30);
+      tone(seconds <= 5 ? "urgent" : "ping");
+      headStartCueRef.current = cue;
+    }
+  }, [data?.game?.startedAt, data?.game?.status, data?.game?.pausedSeconds, data?.game?.rules?.headStartSeconds, fieldNow]);
+
   const refresh = () => utils.game.snapshot.invalidate(safeSession);
   const saveSetup = async () => {
     try { await createSetup.mutateAsync({ ...safeSession, centerLat: setupCenter.lat, centerLng: setupCenter.lng, initialRadius: setupInitialRadius, minimumRadius: setupMinimumRadius, matchMinutes: setupMatchMinutes, videoIntervalMinutes: setupVideoInterval, points: setupPoints }); toast.success("Playing area saved. Lobby is open."); refresh(); } catch (error) { toast.error(error instanceof Error ? error.message : "Could not save setup."); }
@@ -409,6 +444,7 @@ export default function GameRoom() {
   if (game.status === "setup") return <SetupScreen center={setupCenter} radius={setupInitialRadius} minRadius={setupMinimumRadius} matchMinutes={setupMatchMinutes} videoInterval={setupVideoInterval} points={setupPoints} pointMode={pointMode} isHost={viewer.isHost} currentLocation={currentLocation} setCenter={setSetupCenter} setInitial={setSetupInitialRadius} setMinimum={setSetupMinimumRadius} setMatchMinutes={setSetupMatchMinutes} setVideoInterval={setSetupVideoInterval} setPointMode={setPointMode} setPoints={setSetupPoints} onMapClick={addPoint} onUseGps={requestLocation} onSave={saveSetup} onStop={stopMatch} busy={createSetup.isPending} />;
   if (game.status === "lobby") return <LobbyScreen game={game} viewer={viewer} players={data.players} locationGranted={locationGranted} cameraGranted={cameraGranted} permissionsBusy={permissionsBusy} onRequestPermissions={requestFieldPermissions} onReady={async () => { if (!locationGranted || !cameraGranted) { const granted = await requestFieldPermissions(); if (!granted) return; } await perform(() => setReady.mutateAsync({ ...safeSession, isReady: !player?.isReady })); }} onAssign={(playerId: string, isZombie: boolean) => perform(() => assignZombie.mutateAsync({ ...safeSession, playerId, isZombie }))} onStart={() => perform(() => openBriefing.mutateAsync(safeSession))} onStop={stopMatch} onCopy={() => copy(game.joinCode, "Join code")} recoveryCode={session.rejoinCode} onCopyRecovery={() => copy(session.rejoinCode, "Recovery code")} briefingOpen={Boolean(game.briefingOpenedAt)} onDismissBriefing={() => void perform(() => start.mutateAsync(safeSession))} />;
   if (game.status === "finished") return <MatchResultScreen game={game} viewer={viewer} players={data.players} recap={data.recap} onReturn={() => { clearGameSession(); navigate("/"); }} />;
+  if (game.status === "running" && headStart) return <HeadStartCountdown role={viewer.role} seconds={headStartRemaining} playerName={viewer.name} onEnableAudio={() => { primeAudio(); buzz(20); tone("ping"); }} />;
 
   return <main className="min-h-screen bg-[#071116] text-slate-100">
     <header className="sticky top-0 z-20 border-b border-white/10 bg-[#071116]/95 px-4 py-3 backdrop-blur-md"><div className="mx-auto flex max-w-5xl items-center justify-between gap-3"><button onClick={() => { clearGameSession(); navigate("/"); }} className="rounded-lg p-2 text-slate-400 hover:bg-white/10"><ChevronLeft size={20} /></button><PlayerAvatar player={player ?? viewer} size="h-9 w-9" /><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${game.status === "paused" ? "bg-amber-300" : "bg-teal-300"}`} /><span className="truncate text-xs font-black tracking-[0.16em]">{viewer.role === "zombie" ? "INFECTED OPS" : "SURVIVOR OPS"}</span></div><div className="mt-1 text-[10px] font-bold text-slate-500">CODE {game.joinCode} · {survivors} SURVIVOR{survivors === 1 ? "" : "S"} ACTIVE</div></div><div className="flex gap-2"><div className="rounded-xl border border-teal-300/20 bg-teal-300/5 px-2 py-1.5 text-right"><div className="text-[8px] font-bold tracking-[0.12em] text-teal-200">{nextEvent.label}</div><div className="font-mono text-sm font-black text-white">{nextEvent.timer}</div></div><div className="rounded-xl border border-white/10 bg-[#0c1a20] px-3 py-1.5 text-right"><div className="text-[9px] font-bold tracking-[0.15em] text-slate-500">MATCH TIME</div><div className="font-mono text-lg font-black text-white">{formatClock(remaining)}</div></div></div></div></header>
