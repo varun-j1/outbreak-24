@@ -3,7 +3,7 @@
 **Outbreak-24** is a real-time, location-based multiplayer survival game built during a 33-hour hackathon sprint. Players are divided into "Humans" and "Zombies," using their real-world GPS locations to either survive the clock or hunt down the remaining survivors.
 
 ## 📖 The Concept
-To survive, human players must stay on the move and avoid invisible "toxic paths" left behind by roaming zombies. To prevent hiding and camping, humans are forced to verify their surroundings every 10 minutes by uploading a quick 5-second video. If a player fails to upload, or crosses a zombie's recent path, their location is exposed on the Zombie Tactical Map.
+To survive, human players must stay on the move and avoid invisible "toxic paths" left behind by roaming zombies. To prevent hiding and camping, humans are forced to verify their surroundings every 10 minutes by uploading a quick 3-5 second video. If a player fails to upload, crosses a zombie's recent path, or walks out of the set boundaries, their location is exposed on the Zombie Tactical Map.
 
 ## ✨ Key Features
 - **Dual UI Modes:** Humans get a tense, camera-first dashboard with a proximity heartbeat sensor. Zombies get a dark-mode tactical radar map to hunt players.
