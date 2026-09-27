@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lte } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   gameCaptureClaims,
@@ -12,7 +12,7 @@ import {
   InsertUser,
   users,
 } from "../drizzle/schema";
-import { DEFAULT_RULES, buildMatchRecap, canViewSurvivorPing, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, metersBetween, parseRules, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds, stormShrinkMeters } from "./game-logic";
+import { DEFAULT_RULES, buildMatchRecap, canViewSurvivorPing, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, headStartRemainingSeconds, metersBetween, parseRules, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds, shouldExposeCamper, stormShrinkMeters } from "./game-logic";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -151,7 +151,7 @@ export async function addEvent(
   await db.insert(gameEvents).values({ id: id(), gameId, type, actorPlayerId, targetPlayerId, visibility, payloadJson: JSON.stringify(payload) });
 }
 
-export async function updateSetup(session: GuestSession, setup: { centerLat: number; centerLng: number; initialRadius: number; minimumRadius: number; matchMinutes: number; pingIntervalMinutes: number; points: Array<{ id?: string; type: "extraction" | "powerup_candidate"; label: string; lat: number; lng: number }> }) {
+export async function updateSetup(session: GuestSession, setup: { centerLat: number; centerLng: number; initialRadius: number; minimumRadius: number; matchMinutes: number; videoIntervalMinutes: number; points: Array<{ id?: string; type: "extraction" | "powerup_candidate"; label: string; lat: number; lng: number }> }) {
   const db = await requireDb();
   const player = await getSessionPlayer(session);
   if (!player.isHost) throw new Error("Only the host can configure the playing area.");
@@ -169,7 +169,7 @@ export async function updateSetup(session: GuestSession, setup: { centerLat: num
     initialRadius: setup.initialRadius,
     minimumRadius: setup.minimumRadius,
     currentRadius: setup.initialRadius,
-    rulesJson: JSON.stringify(deriveRules(setup.matchMinutes, setup.pingIntervalMinutes)),
+    rulesJson: JSON.stringify(deriveRules(setup.matchMinutes, setup.videoIntervalMinutes)),
     briefingOpenedAt: null,
     status: "lobby",
   }).where(eq(games.id, session.gameId));
@@ -185,6 +185,8 @@ export async function updateSetup(session: GuestSession, setup: { centerLat: num
 export async function setReady(session: GuestSession, isReady: boolean) {
   const db = await requireDb();
   const player = await getSessionPlayer(session);
+  const game = (await db.select({ status: games.status }).from(games).where(eq(games.id, session.gameId)).limit(1))[0];
+  if (!game || game.status !== "lobby") throw new Error("Readiness can only change while the lobby is open.");
   await db.update(gamePlayers).set({ isReady }).where(eq(gamePlayers.id, player.id));
   await addEvent(session.gameId, isReady ? "ready" : "not_ready", player.id, null, "public", { name: player.displayName });
 }
@@ -193,6 +195,8 @@ export async function assignZombie(session: GuestSession, playerId: string, isZo
   const db = await requireDb();
   const host = await getSessionPlayer(session);
   if (!host.isHost) throw new Error("Only the host can assign the initial zombie.");
+  const game = (await db.select({ status: games.status }).from(games).where(eq(games.id, session.gameId)).limit(1))[0];
+  if (!game || game.status !== "lobby") throw new Error("Roles can only be chosen while the lobby is open.");
   const target = (await db.select().from(gamePlayers).where(and(eq(gamePlayers.id, playerId), eq(gamePlayers.gameId, session.gameId))).limit(1))[0];
   if (!target) throw new Error("Player not found.");
   await db.update(gamePlayers).set({ role: isZombie ? "zombie" : "survivor" }).where(eq(gamePlayers.id, playerId));
@@ -206,6 +210,7 @@ export async function openBriefing(session: GuestSession) {
   if (!game || game.status !== "lobby") throw new Error("The briefing is only available from the lobby.");
   const players = await db.select().from(gamePlayers).where(eq(gamePlayers.gameId, session.gameId));
   if (players.length < 2) throw new Error("At least two players are needed to open the briefing.");
+  if (players.some(player => !player.isReady)) throw new Error("Every player, including the host, must be ready before the briefing.");
   await db.update(games).set({ briefingOpenedAt: new Date() }).where(eq(games.id, session.gameId));
   await addEvent(session.gameId, "briefing_opened", host.id, null, "public", {});
 }
@@ -219,21 +224,25 @@ export async function startGame(session: GuestSession) {
   if (!game.briefingOpenedAt) throw new Error("Open the mission briefing for the whole team before starting.");
   const players = await db.select().from(gamePlayers).where(eq(gamePlayers.gameId, session.gameId));
   if (players.length < 2) throw new Error("At least two players are needed to start.");
+  if (players.some(player => !player.isReady)) throw new Error("Every player, including the host, must grant field access and mark ready.");
   let zombies = players.filter(player => player.role === "zombie");
   if (!zombies.length) {
     const chosen = players[Math.floor(Math.random() * players.length)];
     await db.update(gamePlayers).set({ role: "zombie" }).where(eq(gamePlayers.id, chosen.id));
     zombies = [chosen];
   }
+  if (!players.some(player => player.role === "survivor")) throw new Error("Keep at least one survivor in the match.");
   const now = new Date();
   await db.update(gamePoints).set({ isActive: false }).where(and(eq(gamePoints.gameId, session.gameId), eq(gamePoints.type, "extraction")));
   const rules = parseRules(game.rulesJson);
   await db.update(games).set({
-    status: "running", startedAt: now, pausedAt: null, pausedSeconds: 0, nextPingAt: new Date(now.getTime() + (rules.headStartSeconds + scheduledPingIntervalSeconds(rules, players.filter(player => player.role === "survivor").length)) * 1_000),
+    status: "running", startedAt: now, pausedAt: null, pausedSeconds: 0,
+    nextPingAt: new Date(now.getTime() + scheduledPingIntervalSeconds(rules, players.filter(player => player.role === "survivor").length) * 1_000),
+    nextVideoAt: new Date(now.getTime() + rules.videoIntervalSeconds * 1_000),
     lastCaptureAt: now, stormPhase: "normal", stormPhaseEndsAt: null, lastItemSpawnAt: now, winner: null, finishedAt: null,
   }).where(eq(games.id, session.gameId));
-  await db.update(gamePlayers).set({ status: "active", extractionStartedAt: null, boundaryOutsideSince: null, boundaryExposed: false, lastPingLat: null, lastPingLng: null, lastPingAt: null, lastPingExpiresAt: null, videoDueAt: null, videoUploadDeadlineAt: null, videoExposureUntil: null }).where(eq(gamePlayers.gameId, session.gameId));
-  await addEvent(session.gameId, "match_started", host.id, null, "public", { headStartSeconds: rules.headStartSeconds, extractionOpensAtSeconds: rules.extractionOpensAtSeconds, matchSeconds: rules.matchSeconds });
+  await db.update(gamePlayers).set({ status: "active", extractionStartedAt: null, boundaryOutsideSince: null, boundaryExposed: false, lastPingLat: null, lastPingLng: null, lastPingAt: null, lastPingExpiresAt: null, campAnchorLat: null, campAnchorLng: null, campAnchorAt: null, videoDueAt: null, videoUploadDeadlineAt: null, videoExposureUntil: null }).where(eq(gamePlayers.gameId, session.gameId));
+  await addEvent(session.gameId, "match_started", host.id, null, "public", { headStartSeconds: rules.headStartSeconds, extractionOpensAtSeconds: rules.extractionOpensAtSeconds, matchSeconds: rules.matchSeconds, pingIntervalSeconds: 60, videoIntervalSeconds: rules.videoIntervalSeconds });
 }
 
 export async function pauseGame(session: GuestSession, paused: boolean) {
@@ -313,20 +322,29 @@ export async function tickGame(gameId: string) {
     }
   }
   if (game.nextPingAt && game.nextPingAt <= now) {
+    const next = new Date(now.getTime() + scheduledPingIntervalSeconds(rules, survivors.length) * 1_000);
+    const reservation = await db.update(games).set({ nextPingAt: next }).where(and(eq(games.id, game.id), lte(games.nextPingAt, now)));
+    if (!(reservation as any)[0]?.affectedRows) return;
     for (const player of survivors) {
       if (player.lastLat !== null && player.lastLng !== null) {
         await db.update(gamePlayers).set({ lastPingLat: player.lastLat, lastPingLng: player.lastLng, lastPingAt: now, lastPingExpiresAt: new Date(now.getTime() + 35_000) }).where(eq(gamePlayers.id, player.id));
       }
+    }
+    await addEvent(game.id, "survivor_ping", null, null, "public", { survivorCount: survivors.length, nextPingAt: next.toISOString() });
+  }
+  if (game.nextVideoAt && game.nextVideoAt <= now) {
+    const nextVideoAt = new Date(now.getTime() + rules.videoIntervalSeconds * 1_000);
+    const reservation = await db.update(games).set({ nextVideoAt }).where(and(eq(games.id, game.id), lte(games.nextVideoAt, now)));
+    if (!(reservation as any)[0]?.affectedRows) return;
+    for (const player of survivors) {
       if (player.videoSkipArmed) {
         await db.update(gamePlayers).set({ videoSkipArmed: false }).where(eq(gamePlayers.id, player.id));
-        await addEvent(game.id, "video_skip_used", player.id, null, "target", {});
+        await addEvent(game.id, "video_skip_used", player.id, player.id, "target", {});
       } else {
         await db.update(gamePlayers).set({ videoDueAt: now, videoUploadDeadlineAt: new Date(now.getTime() + 30_000), videoExposureUntil: null }).where(eq(gamePlayers.id, player.id));
       }
     }
-    const next = new Date(now.getTime() + scheduledPingIntervalSeconds(rules, survivors.length) * 1000);
-    await db.update(games).set({ nextPingAt: next }).where(eq(games.id, game.id));
-    await addEvent(game.id, "survivor_ping", null, null, "public", { survivorCount: survivors.length, nextPingAt: next.toISOString() });
+    await addEvent(game.id, "video_requested", null, null, "survivors", { deadlineSeconds: 30, nextVideoAt: nextVideoAt.toISOString() });
   }
   for (const player of players.filter(player => player.videoUploadDeadlineAt && player.videoUploadDeadlineAt <= now)) {
     const canPing = player.lastLat !== null && player.lastLng !== null;
@@ -389,10 +407,13 @@ export async function reportLocation(session: GuestSession, location: { lat: num
   if (!game || game.status !== "running" || player.status !== "active") return;
   const now = new Date();
   const rules = parseRules(game.rulesJson);
+  const elapsed = elapsedGameSeconds(game.startedAt, game.pausedSeconds, now);
   const previous = player.lastLat !== null && player.lastLng !== null && player.lastLocationAt && now.getTime() - player.lastLocationAt.getTime() <= 20_000
     ? { lat: player.lastLat, lng: player.lastLng }
     : null;
   const current = { lat: location.lat, lng: location.lng };
+  // Infected may see their own GPS dot, but their active tools remain locked until the 45-second head start completes.
+  // Location is still stored during this time so a clean frozen ping can be taken later.
   const safelyInside = roundedSquarePositionWithinBounds(
     { lat: game.centerLat, lng: game.centerLng },
     current,
@@ -415,6 +436,10 @@ export async function reportLocation(session: GuestSession, location: { lat: num
     boundaryExposed = false;
   }
   let trailExposureUntil = player.trailExposureUntil;
+  let videoExposureUntil = player.videoExposureUntil;
+  let campAnchorLat = player.campAnchorLat;
+  let campAnchorLng = player.campAnchorLng;
+  let campAnchorAt = player.campAnchorAt;
   if (player.role === "zombie" && previous && elapsedGameSeconds(game.startedAt, game.pausedSeconds, now) >= rules.headStartSeconds) {
     const moved = metersBetween(previous, current);
     if (moved > 1 && moved < 120) {
@@ -425,6 +450,19 @@ export async function reportLocation(session: GuestSession, location: { lat: num
     const trails = await db.select().from(gameTrails).where(and(eq(gameTrails.gameId, game.id), gt(gameTrails.expiresAt, now)));
     if (trails.some(trail => distanceToSegmentMeters(current, { lat: trail.fromLat, lng: trail.fromLng }, { lat: trail.toLat, lng: trail.toLng }) <= rules.trailWidthMeters + Math.max(0, location.accuracy || 0))) {
       trailExposureUntil = new Date(now.getTime() + rules.trailExitExposureSeconds * 1000);
+    }
+    const anchor = campAnchorLat !== null && campAnchorLng !== null ? { lat: campAnchorLat, lng: campAnchorLng } : null;
+    if (!anchor || !campAnchorAt || metersBetween(anchor, current) > 15) {
+      campAnchorLat = current.lat;
+      campAnchorLng = current.lng;
+      campAnchorAt = now;
+    } else if (shouldExposeCamper({ anchor, current, anchoredAt: campAnchorAt, now })) {
+      videoExposureUntil = new Date(now.getTime() + 20_000);
+      campAnchorLat = current.lat;
+      campAnchorLng = current.lng;
+      campAnchorAt = now;
+      await addEvent(game.id, "camper_exposed", player.id, null, "zombies", { name: player.displayName, seconds: 20, lat: current.lat, lng: current.lng });
+      await addEvent(game.id, "camper_warning", null, player.id, "target", { seconds: 20, radiusMeters: 15 });
     }
   }
   let extractionStartedAt = player.extractionStartedAt;
@@ -443,7 +481,29 @@ export async function reportLocation(session: GuestSession, location: { lat: num
       extractionStartedAt = null;
     }
   }
-  await db.update(gamePlayers).set({ lastLat: current.lat, lastLng: current.lng, lastLocationAt: now, boundaryOutsideSince, boundaryExposed, status, trailExposureUntil, extractionStartedAt }).where(eq(gamePlayers.id, player.id));
+  await db.update(gamePlayers).set({ lastLat: current.lat, lastLng: current.lng, lastLocationAt: now, boundaryOutsideSince, boundaryExposed, status, trailExposureUntil, videoExposureUntil, campAnchorLat, campAnchorLng, campAnchorAt, extractionStartedAt }).where(eq(gamePlayers.id, player.id));
+}
+
+/** Validates real-time media actions before bytes are stored. */
+export async function validateGameMediaAction(input: { gameId: string; playerToken: string; targetPlayerId?: string | null; kind: "photo" | "video" }) {
+  const db = await requireDb();
+  const player = await getSessionPlayer({ gameId: input.gameId, playerToken: input.playerToken });
+  const game = (await db.select().from(games).where(eq(games.id, input.gameId)).limit(1))[0];
+  if (!game || game.status !== "running") throw new Error("Media can only be submitted during an active match.");
+  const now = new Date();
+  const rules = parseRules(game.rulesJson);
+  const elapsed = elapsedGameSeconds(game.startedAt, game.pausedSeconds, now);
+  if (input.kind === "photo") {
+    if (player.role !== "zombie" || player.status !== "active") throw new Error("Only active infected players can submit a capture photo.");
+    if (headStartRemainingSeconds(elapsed, rules) > 0) throw new Error(`Do not move yet — hunting unlocks in ${headStartRemainingSeconds(elapsed, rules)} seconds.`);
+    if (!input.targetPlayerId) throw new Error("Choose the survivor shown in the capture before sending the photo.");
+    const target = (await db.select().from(gamePlayers).where(and(eq(gamePlayers.id, input.targetPlayerId), eq(gamePlayers.gameId, input.gameId))).limit(1))[0];
+    if (!target || target.role !== "survivor" || target.status !== "active") throw new Error("That survivor is no longer eligible for a capture claim.");
+  } else {
+    if (player.role !== "survivor" || player.status !== "active") throw new Error("Only active survivors can submit a field video.");
+    if (!player.videoDueAt || !player.videoUploadDeadlineAt || player.videoUploadDeadlineAt <= now) throw new Error("There is no active field-video request. Wait for the next video check.");
+  }
+  return player;
 }
 
 export async function collectItem(session: GuestSession, itemId: string) {
@@ -525,7 +585,7 @@ export async function gameSnapshot(session: GuestSession) {
   ]);
   const now = new Date();
   const isHost = viewer.isHost;
-  const canSeeLiveSurvivor = (target: typeof allPlayers[number]) => target.id === viewer.id || (viewer.role === "zombie" && ((!!target.trailExposureUntil && target.trailExposureUntil > now) || target.boundaryExposed));
+  const canSeeLiveSurvivor = (target: typeof allPlayers[number]) => target.id === viewer.id || (viewer.role === "zombie" && ((!!target.trailExposureUntil && target.trailExposureUntil > now) || (!!target.videoExposureUntil && target.videoExposureUntil > now) || target.boundaryExposed));
   const visiblePlayers = allPlayers.map(target => {
     const base = { id: target.id, name: target.displayName, profileImageUrl: target.profileImageKey ? `/manus-storage/${target.profileImageKey}` : null, role: target.role, status: target.status, isHost: target.isHost, isReady: target.isReady, exposureUntil: target.videoExposureUntil && target.videoExposureUntil > now ? target.videoExposureUntil : target.trailExposureUntil, boundaryExposed: target.boundaryExposed, lastLocationAt: target.lastLocationAt, pingedAt: target.lastPingAt };
     if (canSeeLiveSurvivor(target) || (viewer.role === "zombie" && target.role === "zombie")) return { ...base, lat: target.lastLat, lng: target.lastLng, positionKind: "live" as const };
@@ -533,9 +593,14 @@ export async function gameSnapshot(session: GuestSession) {
     return { ...base, lat: null, lng: null, positionKind: "hidden" as const };
   });
   const visibleEvents = events.filter(event => event.visibility === "public" || (event.visibility === "host" && isHost) || (event.visibility === "target" && event.targetPlayerId === viewer.id) || (event.visibility === "zombies" && viewer.role === "zombie") || (event.visibility === "survivors" && viewer.role === "survivor"));
-  const visibleMedia = media.filter(entry => isHost || entry.playerId === viewer.id || entry.targetPlayerId === viewer.id || (entry.visibility === "zombies" && viewer.role === "zombie") || (entry.visibility === "survivors" && viewer.role === "survivor")).map(entry => ({ ...entry, url: `/manus-storage/${entry.storageKey}` }));
-  const visibleClaims = claims.filter(claim => isHost || claim.targetPlayerId === viewer.id || claim.zombiePlayerId === viewer.id);
-  const visibleItems = items.filter(item => item.expiresAt > now && (item.faction === viewer.role || isHost));
+  const authorizedMedia = media.filter(entry => entry.playerId === viewer.id || entry.targetPlayerId === viewer.id || (entry.visibility === "zombies" && viewer.role === "zombie") || (entry.visibility === "survivors" && viewer.role === "survivor"));
+  // Infected Intel is intentionally short-lived: retain the newest two survivor videos while preserving any capture evidence the viewer owns.
+  const visibleMedia = (viewer.role === "zombie"
+    ? authorizedMedia.filter(entry => entry.kind !== "video").concat(authorizedMedia.filter(entry => entry.kind === "video").slice(0, 2))
+    : authorizedMedia
+  ).map(entry => ({ ...entry, url: `/manus-storage/${entry.storageKey}` }));
+  const visibleClaims = claims.filter(claim => claim.targetPlayerId === viewer.id || claim.zombiePlayerId === viewer.id);
+  const visibleItems = items.filter(item => item.expiresAt > now && item.faction === viewer.role);
   const rules = parseRules(game.rulesJson);
   const staleLocationSeconds = viewer.lastLocationAt ? Math.max(0, Math.floor((now.getTime() - viewer.lastLocationAt.getTime()) / 1000)) : null;
   const recap = buildMatchRecap(allPlayers, claims);

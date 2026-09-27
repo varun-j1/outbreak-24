@@ -5,7 +5,9 @@ export const DEFAULT_RULES = {
   extractionHoldSeconds: 10,
   powerupStartsAtSeconds: 75,
   powerupIntervalSeconds: 60,
-  fixedPingIntervalSeconds: 0,
+  // Survivor position broadcasts are intentionally fixed: every minute, never live tracking.
+  fixedPingIntervalSeconds: 60,
+  videoIntervalSeconds: 3 * 60,
   stormStartsAtSeconds: 5 * 60,
   trailLifetimeSeconds: 100,
   trailExitExposureSeconds: 15,
@@ -56,8 +58,8 @@ const EARTH_RADIUS_M = 6_371_000;
 const toRadians = (value: number) => (value * Math.PI) / 180;
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
-/** Host match length drives the extraction window, item cadence, and ping frequency. */
-export function deriveRules(matchMinutes: number, fixedPingIntervalMinutes = 0): GameRules {
+/** Host match length drives extraction and item pacing; pings remain a fixed one-minute pulse. */
+export function deriveRules(matchMinutes: number, videoIntervalMinutes = 3): GameRules {
   const matchSeconds = Math.round(clamp(matchMinutes, 6, 45) * 60);
   const extractionWindow = clamp(Math.round(matchSeconds * 0.18), 75, 180);
   return {
@@ -66,7 +68,8 @@ export function deriveRules(matchMinutes: number, fixedPingIntervalMinutes = 0):
     extractionOpensAtSeconds: matchSeconds - extractionWindow,
     powerupStartsAtSeconds: clamp(Math.round(matchSeconds * 0.14), 45, 120),
     powerupIntervalSeconds: clamp(Math.round(matchSeconds / 10), 35, 75),
-    fixedPingIntervalSeconds: fixedPingIntervalMinutes > 0 ? Math.round(clamp(fixedPingIntervalMinutes, 1, 10) * 60) : 0,
+    fixedPingIntervalSeconds: 60,
+    videoIntervalSeconds: Math.round(clamp(videoIntervalMinutes, 1, 10) * 60),
   };
 }
 
@@ -109,15 +112,28 @@ export function pingIntervalSeconds(survivorCount: number, matchSecondsOrRandom?
 }
 
 export function scheduledPingIntervalSeconds(rules: GameRules, survivorCount: number, random = Math.random): number {
-  return rules.fixedPingIntervalSeconds > 0 ? rules.fixedPingIntervalSeconds : pingIntervalSeconds(survivorCount, rules.matchSeconds, random);
+  // Kept as a function so existing game flow can call it, but it deliberately ignores variable cadence.
+  void rules; void survivorCount; void random;
+  return 60;
 }
 
 export function parseRules(input?: string | null): GameRules {
   try {
     const parsed = input ? JSON.parse(input) : {};
-    const derived = deriveRules((parsed.matchSeconds ?? DEFAULT_RULES.matchSeconds) / 60, (parsed.fixedPingIntervalSeconds ?? 0) / 60);
-    return { ...derived, ...parsed };
+    const derived = deriveRules((parsed.matchSeconds ?? DEFAULT_RULES.matchSeconds) / 60, (parsed.videoIntervalSeconds ?? DEFAULT_RULES.videoIntervalSeconds) / 60);
+    // Normalise legacy games that may carry an old adaptive-ping field.
+    return { ...derived, ...parsed, fixedPingIntervalSeconds: 60, videoIntervalSeconds: parsed.videoIntervalSeconds ?? derived.videoIntervalSeconds };
   } catch { return DEFAULT_RULES; }
+}
+
+export function headStartRemainingSeconds(elapsedSeconds: number, rules: Pick<GameRules, "headStartSeconds">) {
+  return Math.max(0, rules.headStartSeconds - elapsedSeconds);
+}
+
+export function shouldExposeCamper(input: { anchor: Coordinate | null; current: Coordinate; anchoredAt: Date | null; now: Date; accuracyMeters?: number | null }) {
+  if (!input.anchor || !input.anchoredAt) return false;
+  const movementAllowance = 15 + Math.max(3, Math.min(12, input.accuracyMeters ?? 0));
+  return metersBetween(input.anchor, input.current) <= movementAllowance && input.now.getTime() - input.anchoredAt.getTime() >= 30_000;
 }
 
 export function elapsedGameSeconds(startedAt: Date | null, pausedSeconds: number, now = new Date()): number {

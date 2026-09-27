@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMatchRecap, canViewSurvivorPing, deriveRules, distanceToSegmentMeters, effectiveStormRadius, metersBetween, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds, stormShrinkMeters } from "./game-logic";
+import { buildMatchRecap, canViewSurvivorPing, deriveRules, distanceToSegmentMeters, effectiveStormRadius, headStartRemainingSeconds, metersBetween, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds, shouldExposeCamper, stormShrinkMeters } from "./game-logic";
 
 describe("game rule utilities", () => {
   it("measures short outdoor distances", () => {
@@ -37,11 +37,13 @@ describe("game rule utilities", () => {
     expect(long.stormStartsAtSeconds).toBe(300);
   });
 
-  it("uses the host-selected ping interval when one is set", () => {
-    const fixed = deriveRules(12, 3);
-    const adaptive = deriveRules(12, 0);
-    expect(scheduledPingIntervalSeconds(fixed, 3, () => 0)).toBe(180);
-    expect(scheduledPingIntervalSeconds(adaptive, 3, () => 0)).toBe(pingIntervalSeconds(3, adaptive.matchSeconds, () => 0));
+  it("uses minute pings and host-selected field-video checks", () => {
+    const twoMinuteVideos = deriveRules(12, 2);
+    const fiveMinuteVideos = deriveRules(12, 5);
+    expect(scheduledPingIntervalSeconds(twoMinuteVideos, 3, () => 0)).toBe(60);
+    expect(scheduledPingIntervalSeconds(fiveMinuteVideos, 1, () => 0.999)).toBe(60);
+    expect(twoMinuteVideos.videoIntervalSeconds).toBe(120);
+    expect(fiveMinuteVideos.videoIntervalSeconds).toBe(300);
   });
 
   it("contracts the zone continuously during the announced shrink", () => {
@@ -70,6 +72,16 @@ describe("game rule utilities", () => {
     expect(roundedSquarePositionWithinBounds(center, { lat: 0.0008, lng: 0.0008 }, 100)).toBe(true);
     expect(roundedSquarePositionWithinBounds(center, { lat: 0.0011, lng: 0 }, 100)).toBe(false);
     expect(roundedSquarePositionWithinBounds(center, { lat: 0.00088, lng: 0.00088 }, 100)).toBe(false);
+  });
+
+  it("locks infected actions for the head start and exposes stationary survivors", () => {
+    expect(headStartRemainingSeconds(0, deriveRules(12))).toBe(45);
+    expect(headStartRemainingSeconds(45, deriveRules(12))).toBe(0);
+    const anchor = { lat: -34.92051, lng: 138.60456 };
+    const started = new Date("2026-01-01T00:00:00.000Z");
+    expect(shouldExposeCamper({ anchor, current: { lat: -34.92050, lng: 138.60457 }, anchoredAt: started, now: new Date("2026-01-01T00:00:29.999Z") })).toBe(false);
+    expect(shouldExposeCamper({ anchor, current: { lat: -34.92050, lng: 138.60457 }, anchoredAt: started, now: new Date("2026-01-01T00:00:30.000Z") })).toBe(true);
+    expect(shouldExposeCamper({ anchor, current: { lat: -34.92020, lng: 138.60456 }, anchoredAt: started, now: new Date("2026-01-01T00:00:35.000Z") })).toBe(false);
   });
 
   it("builds a capture recap from resolved authoritative claims", () => {

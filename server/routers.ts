@@ -28,7 +28,7 @@ export const appRouter = router({
       initialRadius: z.number().min(100).max(5_000),
       minimumRadius: z.number().min(50).max(4_000),
       matchMinutes: z.number().int().min(6).max(45),
-      pingIntervalMinutes: z.number().int().min(0).max(10),
+      videoIntervalMinutes: z.number().int().min(1).max(10),
       points: z.array(z.object({ id: z.string().optional(), type: z.enum(["extraction", "powerup_candidate"]), label: z.string().min(1).max(32), lat: z.number(), lng: z.number() })).max(12),
     })).mutation(({ input }) => updateSetup(input, input)),
     setReady: publicProcedure.input(sessionInput.extend({ isReady: z.boolean() })).mutation(({ input }) => setReady(input, input.isReady)),
