@@ -56,11 +56,12 @@ describe("game rule utilities", () => {
     expect(stormShrinkMeters(120, 110)).toBe(10);
   });
 
-  it("limits survivor pings to zombies or a ten-second survivor confirmation", () => {
+  it("retains survivor pings for zombies while limiting survivor confirmations to ten seconds", () => {
     const pingedAt = new Date("2026-01-01T00:00:00.000Z");
     const expiresAt = new Date("2026-01-01T00:00:35.000Z");
     const shared = { targetId: "survivor-a", targetRole: "survivor", pingedAt, expiresAt };
     expect(canViewSurvivorPing({ ...shared, viewerId: "zombie-a", viewerRole: "zombie", now: new Date("2026-01-01T00:00:30.000Z") })).toBe(true);
+    expect(canViewSurvivorPing({ ...shared, viewerId: "zombie-a", viewerRole: "zombie", now: new Date("2026-01-01T00:04:00.000Z") })).toBe(true);
     expect(canViewSurvivorPing({ ...shared, viewerId: "teammate-a", viewerRole: "survivor", now: new Date("2026-01-01T00:00:09.999Z") })).toBe(true);
     expect(canViewSurvivorPing({ ...shared, viewerId: "teammate-a", viewerRole: "survivor", now: new Date("2026-01-01T00:00:10.001Z") })).toBe(false);
     expect(canViewSurvivorPing({ ...shared, viewerId: "survivor-a", viewerRole: "survivor", now: new Date("2026-01-01T00:00:02.000Z") })).toBe(false);

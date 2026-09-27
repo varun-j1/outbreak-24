@@ -602,13 +602,26 @@ export async function gameSnapshot(session: GuestSession) {
   const visibleClaims = claims.filter(claim => claim.targetPlayerId === viewer.id || claim.zombiePlayerId === viewer.id);
   const visibleItems = items.filter(item => item.expiresAt > now && item.faction === viewer.role);
   const rules = parseRules(game.rulesJson);
+  const elapsedSeconds = elapsedGameSeconds(game.startedAt, game.pausedSeconds, now);
+  const headStartRemaining = game.status === "running" ? headStartRemainingSeconds(elapsedSeconds, rules) : 0;
   const staleLocationSeconds = viewer.lastLocationAt ? Math.max(0, Math.floor((now.getTime() - viewer.lastLocationAt.getTime()) / 1000)) : null;
   const recap = buildMatchRecap(allPlayers, claims);
   const visiblePoints = ["running", "paused", "finished"].includes(game.status)
     ? points.filter(point => point.type === "extraction" && point.isActive)
     : points;
   return {
-    game: { ...game, currentRadius: effectiveStormRadius(game, now), rules, elapsedSeconds: elapsedGameSeconds(game.startedAt, game.pausedSeconds, now) },
+    game: {
+      ...game,
+      // The innermost boundary is a host-only setup aid; it is never shared to field devices.
+      minimumRadius: viewer.isHost && ["setup", "lobby"].includes(game.status) ? game.minimumRadius : null,
+      currentRadius: effectiveStormRadius(game, now),
+      rules,
+      elapsedSeconds,
+      headStartRemainingSeconds: headStartRemaining,
+      huntTransitionSeconds: headStartRemaining === 0 && elapsedSeconds >= rules.headStartSeconds && elapsedSeconds < rules.headStartSeconds + 3
+        ? rules.headStartSeconds + 3 - elapsedSeconds
+        : 0,
+    },
     viewer: { id: viewer.id, name: viewer.displayName, role: viewer.role, status: viewer.status, isHost: viewer.isHost, inventory: viewer.inventory, videoSkipArmed: viewer.videoSkipArmed, videoDueAt: viewer.videoDueAt, videoUploadDeadlineAt: viewer.videoUploadDeadlineAt, videoExposureUntil: viewer.videoExposureUntil, staleLocationSeconds, extractionStartedAt: viewer.extractionStartedAt, boundaryOutsideSince: viewer.boundaryOutsideSince },
     players: visiblePlayers,
     points: visiblePoints,

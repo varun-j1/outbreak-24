@@ -85,6 +85,8 @@
 .mapbox-field__self img { height: 100%; width: 100%; object-fit: cover; }
 .mapbox-field__ping { display: flex; max-width: 154px; align-items: center; gap: 6px; padding: 4px 7px 4px 4px; border: 2px solid rgba(6,16,20,.9); border-radius: 15px; background: rgba(34,214,198,.96); color: #061014; box-shadow: 0 7px 16px rgba(0,0,0,.36); }
 .mapbox-field__ping--zombie { background: rgba(255,69,92,.96); }
+.mapbox-field__ping--compact { height: 30px; width: 30px; padding: 2px; border-radius: 50%; opacity: .84; box-shadow: 0 4px 10px rgba(0,0,0,.34); }
+.mapbox-field__ping--compact .mapbox-field__portrait { height: 22px; width: 22px; flex-basis: 22px; font-size: 8px; }
 .mapbox-field__portrait { display: grid; height: 29px; width: 29px; flex: 0 0 29px; place-items: center; overflow: hidden; border-radius: 50%; background: rgba(6,16,20,.17); font-size: 10px; font-weight: 900; }
 .mapbox-field__portrait img { height: 100%; width: 100%; object-fit: cover; }
 .mapbox-field__ping b, .mapbox-field__ping small { display: block; overflow: hidden; max-width: 107px; text-overflow: ellipsis; white-space: nowrap; }

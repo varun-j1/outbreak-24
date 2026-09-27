@@ -67,6 +67,15 @@ function HeadStartCountdown({ role, seconds, playerName, onEnableAudio }: { role
   </main>;
 }
 
+function HuntBeginsTransition({ role, seconds }: { role: string; seconds: number }) {
+  const survivor = role === "survivor";
+  const count = Math.max(1, Math.ceil(seconds));
+  return <main className={`relative isolate grid min-h-screen place-items-center overflow-hidden p-6 text-center ${survivor ? "bg-[#06151a]" : "bg-[#180a0f]"}`}>
+    <div aria-hidden className={`absolute h-[36rem] w-[36rem] rounded-full blur-3xl ${survivor ? "bg-teal-300/25" : "bg-[#ff455c]/30"}`} />
+    <section className="relative z-10"><div className={`mx-auto mb-6 grid h-14 w-14 place-items-center rounded-2xl ${survivor ? "bg-teal-300 text-[#071116]" : "bg-[#ff455c] text-[#071116]"}`}><Radio size={27} className="animate-pulse" /></div><div className={`text-[11px] font-black tracking-[.25em] ${survivor ? "text-teal-200" : "text-[#ff9ba8]"}`}>HEAD START COMPLETE</div><div className="mt-3 font-mono text-[10rem] font-black leading-none tracking-[-.12em] text-white sm:text-[14rem]">{count}</div><h1 className="mt-3 text-4xl font-black tracking-[-.05em] text-white sm:text-6xl">HUNT BEGINS.</h1><p className="mx-auto mt-4 max-w-sm text-sm font-bold leading-6 text-slate-300">{survivor ? "Keep moving. Infected routes, trails, and capture tools are now active." : "Move now. Survivor last-location pings and field tools are now live."}</p></section>
+  </main>;
+}
+
 function MediaCapture({ mode, targetName, onClose, onComplete }: { mode: "photo" | "video"; targetName?: string; onClose: () => void; onComplete: (blob: Blob) => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -169,11 +178,15 @@ export default function GameRoom() {
   const shownEvidenceIdsRef = useRef<Set<string>>(new Set());
   const handledVideoDeadlineRef = useRef<string | null>(null);
   const headStartCueRef = useRef<number | null>(null);
+  const huntCueRef = useRef<number | null>(null);
   const queueFieldAlert = (alert: FieldAlert) => setFieldAlerts(current => current.some(item => item.id === alert.id) ? current : [...current, alert].slice(-4));
   const dismissFieldAlert = () => setFieldAlerts(current => current.slice(1));
   const utils = trpc.useUtils();
   const snapshot = trpc.game.snapshot.useQuery(safeSession, { enabled: !!session, refetchInterval: 1_500, refetchIntervalInBackground: true, retry: 1 });
   const data = snapshot.data as Snapshot | undefined;
+  const snapshotAgeSeconds = data ? Math.max(0, Math.floor((Date.now() - snapshot.dataUpdatedAt) / 1_000)) : 0;
+  const synchronizedHeadStartRemaining = data?.game ? Math.max(0, Number(data.game.headStartRemainingSeconds ?? 0) - snapshotAgeSeconds) : 0;
+  const synchronizedHuntTransitionRemaining = data?.game ? Math.max(0, Number(data.game.huntTransitionSeconds ?? 0) - snapshotAgeSeconds) : 0;
   const clock = useLocalClock(data?.game?.startedAt ? timeValue(data.game.startedAt) : Date.now());
   const fieldNow = data?.game?.startedAt ? timeValue(data.game.startedAt) + clock : Date.now();
   const createSetup = trpc.game.saveSetup.useMutation();
@@ -316,20 +329,26 @@ export default function GameRoom() {
 
   useEffect(() => {
     const game = data?.game;
-    if (!game?.startedAt || game.status !== "running") { headStartCueRef.current = null; return; }
-    const elapsed = Math.max(0, Math.floor((fieldNow - timeValue(game.startedAt)) / 1_000) - game.pausedSeconds);
-    const seconds = Math.max(0, game.rules.headStartSeconds - elapsed);
+    if (!game?.startedAt || game.status !== "running") { headStartCueRef.current = null; huntCueRef.current = null; return; }
+    const seconds = synchronizedHeadStartRemaining;
     if (seconds <= 0) {
-      if (headStartCueRef.current !== 0) { buzz([90, 35, 90, 35, 180]); tone("success"); headStartCueRef.current = 0; }
+      const huntCount = Math.max(0, Math.ceil(synchronizedHuntTransitionRemaining));
+      if (huntCount > 0 && huntCueRef.current !== huntCount) {
+        buzz([180, 55, 180, 55, 240]); tone("urgent"); huntCueRef.current = huntCount;
+      } else if (huntCount === 0 && huntCueRef.current !== 0) {
+        buzz([260, 60, 260, 60, 380]); tone("success"); huntCueRef.current = 0;
+      }
+      headStartCueRef.current = 0;
       return;
     }
+    huntCueRef.current = null;
     const cue = seconds <= 5 || seconds % 5 === 0 ? seconds : null;
     if (cue !== null && cue !== headStartCueRef.current) {
       buzz(seconds <= 5 ? [75, 35, 75] : 30);
       tone(seconds <= 5 ? "urgent" : "ping");
       headStartCueRef.current = cue;
     }
-  }, [data?.game?.startedAt, data?.game?.status, data?.game?.pausedSeconds, data?.game?.rules?.headStartSeconds, fieldNow]);
+  }, [data?.game?.startedAt, data?.game?.status, synchronizedHeadStartRemaining, synchronizedHuntTransitionRemaining]);
 
   const refresh = () => utils.game.snapshot.invalidate(safeSession);
   const saveSetup = async () => {
@@ -352,6 +371,8 @@ export default function GameRoom() {
     } catch { toast.error("Camera permission was not granted. Enable it in your browser to capture or verify game media."); return false; }
   };
   const requestFieldPermissions = async () => {
+    // Audio must resume within a direct gesture on every device before automatic cues can play.
+    primeAudio(); buzz(12); tone("ping");
     setPermissionsBusy(true);
     try {
       // Mobile browsers present permission sheets more reliably one after the other than in parallel.
@@ -403,8 +424,9 @@ export default function GameRoom() {
   const elapsed = game.status === "running" ? Math.max(0, Math.floor((clock / 1000) - game.pausedSeconds)) : game.elapsedSeconds;
   const remaining = Math.max(0, game.rules.matchSeconds - elapsed);
   const survivors = data.players.filter((entry: any) => entry.role === "survivor" && entry.status === "active").length;
-  const headStart = elapsed < game.rules.headStartSeconds;
-  const headStartRemaining = Math.max(0, game.rules.headStartSeconds - elapsed);
+  const headStart = game.status === "running" && synchronizedHeadStartRemaining > 0;
+  const headStartRemaining = headStart ? synchronizedHeadStartRemaining : 0;
+  const huntTransition = game.status === "running" && !headStart && synchronizedHuntTransitionRemaining > 0;
   const extractionOpen = elapsed >= game.rules.extractionOpensAtSeconds;
   const pingIn = Math.max(0, Math.round((timeValue(game.nextPingAt) - fieldNow) / 1000));
   const videoIn = Math.max(0, Math.round((timeValue(game.nextVideoAt) - fieldNow) / 1000));
@@ -442,9 +464,10 @@ export default function GameRoom() {
   const activeFieldAlert = fieldAlerts[0];
 
   if (game.status === "setup") return <SetupScreen center={setupCenter} radius={setupInitialRadius} minRadius={setupMinimumRadius} matchMinutes={setupMatchMinutes} videoInterval={setupVideoInterval} points={setupPoints} pointMode={pointMode} isHost={viewer.isHost} currentLocation={currentLocation} setCenter={setSetupCenter} setInitial={setSetupInitialRadius} setMinimum={setSetupMinimumRadius} setMatchMinutes={setSetupMatchMinutes} setVideoInterval={setSetupVideoInterval} setPointMode={setPointMode} setPoints={setSetupPoints} onMapClick={addPoint} onUseGps={requestLocation} onSave={saveSetup} onStop={stopMatch} busy={createSetup.isPending} />;
-  if (game.status === "lobby") return <LobbyScreen game={game} viewer={viewer} players={data.players} locationGranted={locationGranted} cameraGranted={cameraGranted} permissionsBusy={permissionsBusy} onRequestPermissions={requestFieldPermissions} onReady={async () => { if (!locationGranted || !cameraGranted) { const granted = await requestFieldPermissions(); if (!granted) return; } await perform(() => setReady.mutateAsync({ ...safeSession, isReady: !player?.isReady })); }} onAssign={(playerId: string, isZombie: boolean) => perform(() => assignZombie.mutateAsync({ ...safeSession, playerId, isZombie }))} onStart={() => perform(() => openBriefing.mutateAsync(safeSession))} onStop={stopMatch} onCopy={() => copy(game.joinCode, "Join code")} recoveryCode={session.rejoinCode} onCopyRecovery={() => copy(session.rejoinCode, "Recovery code")} briefingOpen={Boolean(game.briefingOpenedAt)} onDismissBriefing={() => void perform(() => start.mutateAsync(safeSession))} />;
+  if (game.status === "lobby") return <LobbyScreen game={game} viewer={viewer} players={data.players} locationGranted={locationGranted} cameraGranted={cameraGranted} permissionsBusy={permissionsBusy} onRequestPermissions={requestFieldPermissions} onReady={async () => { primeAudio(); buzz(10); tone("ping"); if (!locationGranted || !cameraGranted) { const granted = await requestFieldPermissions(); if (!granted) return; } await perform(() => setReady.mutateAsync({ ...safeSession, isReady: !player?.isReady })); }} onAssign={(playerId: string, isZombie: boolean) => perform(() => assignZombie.mutateAsync({ ...safeSession, playerId, isZombie }))} onStart={() => perform(() => openBriefing.mutateAsync(safeSession))} onStop={stopMatch} onCopy={() => copy(game.joinCode, "Join code")} recoveryCode={session.rejoinCode} onCopyRecovery={() => copy(session.rejoinCode, "Recovery code")} briefingOpen={Boolean(game.briefingOpenedAt)} onDismissBriefing={() => void perform(() => start.mutateAsync(safeSession))} />;
   if (game.status === "finished") return <MatchResultScreen game={game} viewer={viewer} players={data.players} recap={data.recap} onReturn={() => { clearGameSession(); navigate("/"); }} />;
   if (game.status === "running" && headStart) return <HeadStartCountdown role={viewer.role} seconds={headStartRemaining} playerName={viewer.name} onEnableAudio={() => { primeAudio(); buzz(20); tone("ping"); }} />;
+  if (huntTransition) return <HuntBeginsTransition role={viewer.role} seconds={synchronizedHuntTransitionRemaining} />;
 
   return <main className="min-h-screen bg-[#071116] text-slate-100">
     <header className="sticky top-0 z-20 border-b border-white/10 bg-[#071116]/95 px-4 py-3 backdrop-blur-md"><div className="mx-auto flex max-w-5xl items-center justify-between gap-3"><button onClick={() => { clearGameSession(); navigate("/"); }} className="rounded-lg p-2 text-slate-400 hover:bg-white/10"><ChevronLeft size={20} /></button><PlayerAvatar player={player ?? viewer} size="h-9 w-9" /><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${game.status === "paused" ? "bg-amber-300" : "bg-teal-300"}`} /><span className="truncate text-xs font-black tracking-[0.16em]">{viewer.role === "zombie" ? "INFECTED OPS" : "SURVIVOR OPS"}</span></div><div className="mt-1 text-[10px] font-bold text-slate-500">CODE {game.joinCode} · {survivors} SURVIVOR{survivors === 1 ? "" : "S"} ACTIVE</div></div><div className="flex gap-2"><div className="rounded-xl border border-teal-300/20 bg-teal-300/5 px-2 py-1.5 text-right"><div className="text-[8px] font-bold tracking-[0.12em] text-teal-200">{nextEvent.label}</div><div className="font-mono text-sm font-black text-white">{nextEvent.timer}</div></div><div className="rounded-xl border border-white/10 bg-[#0c1a20] px-3 py-1.5 text-right"><div className="text-[9px] font-bold tracking-[0.15em] text-slate-500">MATCH TIME</div><div className="font-mono text-lg font-black text-white">{formatClock(remaining)}</div></div></div></div></header>
@@ -457,7 +480,7 @@ export default function GameRoom() {
       {pendingReviewClaim && <button onClick={() => setView("activity")} className="mb-3 flex w-full items-center justify-between gap-3 rounded-xl bg-[#ff455c] px-3 py-3 text-left text-xs font-black text-[#071116]"><span className="flex items-center gap-2"><Camera size={17} />CAPTURE REVIEW REQUIRED — confirm or dispute the photo.</span><span className="rounded-md bg-black/15 px-2 py-1 text-[10px]">REVIEW</span></button>}
       {view === "map" && <>
         <div className="mb-3 grid gap-3 sm:grid-cols-[1.4fr_.6fr]"><StatusCard label="DO THIS NEXT" value={nextAction.title} note={nextAction.note} /><StatusCard label="FIELD TIMER" value={pingIn ? `PING ${formatClock(pingIn)}` : "PING NOW"} note={viewer.videoSkipArmed ? "Video Skip armed." : videoPending ? `Video check opens in ${formatClock(Math.ceil((videoDueAt - Date.now()) / 1000))}.` : `${survivors} survivor${survivors === 1 ? "" : "s"} active.`} /></div>
-        <TacticalMap center={{ lat: game.centerLat, lng: game.centerLng }} radius={game.currentRadius} minimumRadius={game.minimumRadius} points={data.points} players={data.players} trails={data.trails} items={data.items} currentPlayerId={viewer.id} currentLocation={currentLocation} />
+        <TacticalMap center={{ lat: game.centerLat, lng: game.centerLng }} radius={game.currentRadius} points={data.points} players={data.players} trails={data.trails} items={data.items} currentPlayerId={viewer.id} currentLocation={currentLocation} />
         <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-bold"><Legend colour="bg-teal-300" text="SURVIVOR" /><Legend colour="bg-[#ff455c]" text="ZOMBIE" /><Legend colour="bg-[#f5cb55]" text="EXTRACTION" /><Legend colour="bg-[#a885ff]" text="POWER-UP" /><Legend colour="bg-slate-500" text="FROZEN PING" /></div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2">{viewer.role === "zombie" ? <button onClick={() => { primeAudio(); if (!captureCandidates.length) return queueFieldAlert({ id: `capture-target:none:${Date.now()}`, title: "NO CAPTURE TARGET", body: "There is no active survivor available for a capture claim." }); setCaptureTargetPickerOpen(true); }} disabled={headStart || viewer.status !== "active"} className="flex min-h-14 items-center justify-center gap-2 rounded-xl bg-[#ff455c] px-4 text-sm font-black text-[#071116] transition disabled:opacity-40 active:scale-[0.98]"><Camera size={19} />{photoUploading ? "SENDING CAPTURE…" : captureTarget ? `CAPTURE ${captureTarget.name.toUpperCase()}` : "SELECT CAPTURE TARGET"}</button> : <button onClick={() => { primeAudio(); setMediaMode("video"); }} disabled={viewer.status !== "active" || !videoReady} className="flex min-h-14 items-center justify-center gap-2 rounded-xl bg-teal-300 px-4 text-sm font-black text-[#071116] transition disabled:opacity-40 active:scale-[0.98]"><FileVideo size={19} />{videoReady ? "RECORD REQUIRED VIDEO" : "VIDEO CHECK PENDING"}</button>}{viewer.isHost && <button onClick={() => perform(() => pause.mutateAsync({ ...safeSession, paused: game.status !== "paused" }))} className="flex min-h-14 items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-4 text-sm font-black text-white transition hover:bg-white/10 active:scale-[0.98]"><CirclePause size={19} />{game.status === "paused" ? "RESUME GAME" : "PAUSE GAME"}</button>}</div>
         {(nearbyExtraction || nearbyPowerup) && <div className="mt-3 grid gap-3 sm:grid-cols-2">{nearbyExtraction && <button onClick={() => { if (!currentLocation) return; void perform(() => reportLocation.mutateAsync({ ...safeSession, ...currentLocation, accuracy: 8 })); }} className="flex min-h-14 items-center justify-center gap-2 rounded-xl bg-[#f5cb55] px-4 text-sm font-black text-[#071116] active:scale-[0.98]"><Flag size={19} />EXTRACT & ESCAPE</button>}{nearbyPowerup && <button disabled={Boolean(viewer.inventory)} onClick={() => perform(() => collectItem.mutateAsync({ ...safeSession, itemId: nearbyPowerup.id }))} className="flex min-h-14 items-center justify-center gap-2 rounded-xl bg-[#a885ff] px-4 text-sm font-black text-[#071116] disabled:opacity-45 active:scale-[0.98]"><PackageOpen size={19} />{viewer.inventory ? "INVENTORY FULL" : "COLLECT POWER-UP"}</button>}</div>}

@@ -153,7 +153,7 @@ export function stormShrinkMeters(currentRadius: number, minimumRadius: number) 
   return Math.max(0, Math.round(currentRadius - Math.max(minimumRadius, currentRadius * 0.85)));
 }
 
-/** Zombie pings use their server expiry; survivor teammates see a brief ten-second confirmation only. */
+/** Zombies retain every survivor's most recent frozen ping; survivor teammates only get a ten-second confirmation. */
 export function canViewSurvivorPing(input: {
   viewerId: string;
   viewerRole: string;
@@ -165,7 +165,9 @@ export function canViewSurvivorPing(input: {
 }) {
   const now = input.now ?? new Date();
   if (input.targetRole !== "survivor" || input.targetId === input.viewerId || !input.pingedAt) return false;
-  if (input.viewerRole === "zombie") return Boolean(input.expiresAt && input.expiresAt > now);
+  // Each survivor record keeps one authoritative last ping. A later one replaces it;
+  // infected can keep navigating to the prior known location rather than losing it abruptly.
+  if (input.viewerRole === "zombie") return true;
   if (input.viewerRole === "survivor") return now.getTime() - input.pingedAt.getTime() <= SURVIVOR_TEAM_PING_SECONDS * 1_000;
   return false;
 }

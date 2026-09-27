@@ -34,15 +34,17 @@ function escaped(value: string) {
   return value.replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char] ?? char);
 }
 
-function makeIcon(kind: "self" | "snapshot" | "point" | "item", label: string, profileImageUrl?: string | null, role?: string) {
+function makeIcon(kind: "self" | "snapshot" | "point" | "item", label: string, profileImageUrl?: string | null, role?: string, compact = false) {
   let html = "";
   let iconSize: [number, number] = [44, 32];
   let iconAnchor: [number, number] = [22, 16];
   if (kind === "snapshot") {
     const [name, detail] = label.split(" · ", 2);
     const portrait = profileImageUrl ? `<img src="${escaped(profileImageUrl)}" alt="" />` : `<span>${escaped(name.slice(0, 1).toUpperCase())}</span>`;
-    html = `<div class="mapbox-field__ping ${role === "zombie" ? "mapbox-field__ping--zombie" : ""}"><div class="mapbox-field__portrait">${portrait}</div><div><b>${escaped(name)}</b><small>${escaped(detail ?? "LAST PING")}</small></div></div>`;
-    iconSize = [158, 45]; iconAnchor = [79, 45];
+    html = compact
+      ? `<div class="mapbox-field__ping mapbox-field__ping--compact ${role === "zombie" ? "mapbox-field__ping--zombie" : ""}" title="${escaped(name)} · ${escaped(detail ?? "LAST PING")}"><div class="mapbox-field__portrait">${portrait}</div></div>`
+      : `<div class="mapbox-field__ping ${role === "zombie" ? "mapbox-field__ping--zombie" : ""}"><div class="mapbox-field__portrait">${portrait}</div><div><b>${escaped(name)}</b><small>${escaped(detail ?? "LAST PING")}</small></div></div>`;
+    iconSize = compact ? [34, 34] : [158, 45]; iconAnchor = compact ? [17, 17] : [79, 45];
   } else if (kind === "self") {
     html = `<div class="mapbox-field__self ${role === "zombie" ? "mapbox-field__self--zombie" : ""}">${profileImageUrl ? `<img src="${escaped(profileImageUrl)}" alt="Your location" />` : `<span>${escaped(label.slice(0, 1).toUpperCase())}</span>`}</div>`;
     iconSize = [38, 38]; iconAnchor = [19, 19];
@@ -137,6 +139,7 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
 
   const selfPlayer = players.find(player => player.id === currentPlayerId);
   const snapshotPlayers = useMemo(() => players.filter(player => player.positionKind === "snapshot" && player.lat !== null && player.lng !== null), [players]);
+  const livePlayers = useMemo(() => players.filter(player => player.id !== currentPlayerId && player.positionKind === "live" && player.lat !== null && player.lng !== null), [players, currentPlayerId]);
   const routeCandidates = useMemo(() => selfPlayer?.role === "zombie" ? snapshotPlayers : [], [selfPlayer?.role, snapshotPlayers]);
   const ownPosition = currentLocation ?? (selfPlayer?.lat !== null && selfPlayer?.lat !== undefined && selfPlayer.lng !== null && selfPlayer.lng !== undefined ? { lat: selfPlayer.lat, lng: selfPlayer.lng } : null);
   const directionTarget = routeCandidates[0];
@@ -222,7 +225,11 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
     });
     snapshotPlayers.forEach(player => {
       const location = labels[player.id] ?? "field location";
-      next.set(`ping:${player.id}`, { position: { lat: player.lat!, lng: player.lng! }, signature: `ping:${player.profileImageUrl ?? ""}:${player.name}:${location}:${player.lat!.toFixed(6)}:${player.lng!.toFixed(6)}:${player.role}`, icon: makeIcon("snapshot", `${player.name} · LAST PING near ${location}`, player.profileImageUrl, player.role) });
+      const compact = Date.now() - pingTimestamp(player) > 10_000;
+      next.set(`ping:${player.id}`, { position: { lat: player.lat!, lng: player.lng! }, signature: `ping:${player.profileImageUrl ?? ""}:${player.name}:${location}:${player.lat!.toFixed(6)}:${player.lng!.toFixed(6)}:${player.role}:${compact}`, icon: makeIcon("snapshot", `${player.name} · LAST PING near ${location}`, player.profileImageUrl, player.role, compact) });
+    });
+    livePlayers.forEach(player => {
+      next.set(`live:${player.id}`, { position: { lat: player.lat!, lng: player.lng! }, signature: `live:${player.profileImageUrl ?? ""}:${player.name}:${player.lat!.toFixed(6)}:${player.lng!.toFixed(6)}:${player.role}`, icon: makeIcon("self", player.name, player.profileImageUrl, player.role) });
     });
     if (ownPosition) {
       next.set("self", { position: ownPosition, signature: `self:${selfPlayer?.profileImageUrl ?? ""}:${selfPlayer?.name ?? "YOU"}:${ownPosition.lat.toFixed(6)}:${ownPosition.lng.toFixed(6)}:${selfPlayer?.role ?? "survivor"}`, icon: makeIcon("self", selfPlayer?.name ?? "YOU", selfPlayer?.profileImageUrl, selfPlayer?.role ?? "survivor") });
@@ -239,7 +246,7 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
         existing.signature = definition.signature;
       }
     });
-  }, [points, items, snapshotPlayers, selfPlayer, ownPosition, labels, mapReady]);
+  }, [points, items, snapshotPlayers, livePlayers, selfPlayer, ownPosition, labels, mapReady]);
 
   useEffect(() => {
     const trailLayer = trailLayerRef.current;
