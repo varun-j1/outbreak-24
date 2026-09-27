@@ -81,6 +81,8 @@
 .field-map__ping-card b { font-size: 11px; font-weight: 900; letter-spacing: .04em; }
 .field-map__ping-card span { margin-top: 2px; font-size: 9px; font-weight: 800; text-transform: uppercase; }
 .mapbox-field__self { display: grid; height: 34px; width: 34px; place-items: center; overflow: hidden; border: 3px solid #fff; border-radius: 50%; background: #22d6c6; color: #061014; box-shadow: 0 0 0 4px rgba(34,214,198,.24), 0 6px 16px rgba(0,0,0,.45); font-size: 11px; font-weight: 900; }
+.mapbox-field__self-wrap { position: relative; display: grid; height: 38px; width: 38px; place-items: center; }
+.mapbox-field__heading { position: absolute; top: -13px; left: 8px; z-index: 2; color: #f5cb55; font-size: 19px; line-height: 1; text-shadow: 0 1px 4px rgba(0,0,0,.95); transform-origin: 11px 32px; }
 .mapbox-field__self--zombie { background: #ff455c; box-shadow: 0 0 0 4px rgba(255,69,92,.24), 0 6px 16px rgba(0,0,0,.45); }
 .mapbox-field__self img { height: 100%; width: 100%; object-fit: cover; }
 .mapbox-field__ping { display: flex; max-width: 154px; align-items: center; gap: 6px; padding: 4px 7px 4px 4px; border: 2px solid rgba(6,16,20,.9); border-radius: 15px; background: rgba(34,214,198,.96); color: #061014; box-shadow: 0 7px 16px rgba(0,0,0,.36); }

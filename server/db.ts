@@ -18,6 +18,8 @@ import { ENV } from "./_core/env";
 let _db: ReturnType<typeof drizzle> | null = null;
 const id = () => crypto.randomUUID().replace(/-/g, "");
 const token = () => crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
+const MAX_MATCH_PLAYERS = 6;
+const activeGameTicks = new Map<string, Promise<void>>();
 const rejoinCode = () => {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   return Array.from({ length: 10 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
@@ -111,7 +113,7 @@ export async function joinGame(joinCode: string, displayName: string, profileIma
   if (!game) throw new Error("That join code does not exist.");
   if (game.status === "running" || game.status === "finished") throw new Error("This match is not accepting new players.");
   const existingPlayers = await db.select({ id: gamePlayers.id }).from(gamePlayers).where(eq(gamePlayers.gameId, game.id));
-  if (existingPlayers.length >= 8) throw new Error("This lobby is full.");
+  if (existingPlayers.length >= MAX_MATCH_PLAYERS) throw new Error(`This lobby is full (maximum ${MAX_MATCH_PLAYERS} players).`);
   const playerId = id();
   const playerToken = token();
   const playerRejoinCode = rejoinCode();
@@ -149,6 +151,17 @@ export async function addEvent(
 ) {
   const db = await requireDb();
   await db.insert(gameEvents).values({ id: id(), gameId, type, actorPlayerId, targetPlayerId, visibility, payloadJson: JSON.stringify(payload) });
+}
+
+function parseEventPayload(payloadJson?: string | null) {
+  if (!payloadJson) return {};
+  try {
+    const payload = JSON.parse(payloadJson);
+    return payload && typeof payload === "object" ? payload : {};
+  } catch {
+    // One malformed historical event must never take a live match offline.
+    return {};
+  }
 }
 
 export async function updateSetup(session: GuestSession, setup: { centerLat: number; centerLng: number; initialRadius: number; minimumRadius: number; matchMinutes: number; videoIntervalMinutes: number; points: Array<{ id?: string; type: "extraction" | "powerup_candidate"; label: string; lat: number; lng: number }> }) {
@@ -277,6 +290,16 @@ export async function stopGame(session: GuestSession) {
 }
 
 export async function tickGame(gameId: string) {
+  // Several phones can poll and report location at the same moment. Coalescing the
+  // work avoids concurrent state transitions and keeps serverless requests lightweight.
+  const existing = activeGameTicks.get(gameId);
+  if (existing) return existing;
+  const work = tickGameOnce(gameId).finally(() => activeGameTicks.delete(gameId));
+  activeGameTicks.set(gameId, work);
+  return work;
+}
+
+async function tickGameOnce(gameId: string) {
   const db = await requireDb();
   const game = (await db.select().from(games).where(eq(games.id, gameId)).limit(1))[0];
   if (!game || game.status !== "running") return;
@@ -627,7 +650,7 @@ export async function gameSnapshot(session: GuestSession) {
     points: visiblePoints,
     trails: viewer.role === "zombie" ? trails : [],
     items: visibleItems,
-    events: visibleEvents.map(event => ({ ...event, payload: event.payloadJson ? JSON.parse(event.payloadJson) : {} })),
+    events: visibleEvents.map(event => ({ ...event, payload: parseEventPayload(event.payloadJson) })),
     media: visibleMedia,
     claims: visibleClaims,
     recap,

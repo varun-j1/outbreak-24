@@ -94,7 +94,7 @@ export default function Home() {
         <h1 className="text-balance text-5xl font-black leading-[0.9] tracking-[-0.06em] text-white sm:text-6xl lg:text-7xl">WELCOME TO <span className="text-[#ff455c]">OUTBREAK.</span></h1>
         <p className="mt-6 max-w-xl text-pretty text-base leading-7 text-slate-300">A real-world team chase game built around one map, short pings, and a clean objective: escape or infect.</p>
         <div className="mt-8 grid max-w-xl grid-cols-3 gap-3 text-center text-xs">
-          {[[UsersRound, "2–8", "PLAYERS"], [Compass, "GPS", "TRACKING"], [Crosshair, "12 MIN", "MATCH"]].map(([Icon, value, label]) => { const FeatureIcon = Icon as typeof UsersRound; return <div key={String(label)} className="rounded-xl border border-white/8 bg-[#0b181e]/75 px-3 py-4"><FeatureIcon className="mx-auto mb-2 text-teal-200" size={20} /><div className="font-black text-white">{String(value)}</div><div className="mt-1 text-[9px] font-bold tracking-[0.16em] text-slate-500">{String(label)}</div></div>; })}
+          {[[UsersRound, "2–6", "PLAYERS"], [Compass, "GPS", "TRACKING"], [Crosshair, "12 MIN", "MATCH"]].map(([Icon, value, label]) => { const FeatureIcon = Icon as typeof UsersRound; return <div key={String(label)} className="rounded-xl border border-white/8 bg-[#0b181e]/75 px-3 py-4"><FeatureIcon className="mx-auto mb-2 text-teal-200" size={20} /><div className="font-black text-white">{String(value)}</div><div className="mt-1 text-[9px] font-bold tracking-[0.16em] text-slate-500">{String(label)}</div></div>; })}
         </div>
         <p className="mt-6 max-w-xl text-xs leading-5 text-slate-500">Play outdoors in a safe, permitted area. Before getting ready, each player explicitly grants precise location and camera access.</p>
       </div>
