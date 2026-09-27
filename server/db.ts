@@ -12,30 +12,46 @@ import {
   InsertUser,
   users,
 } from "../drizzle/schema";
-import { DEFAULT_RULES, buildMatchRecap, canViewSurvivorPing, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, headStartRemainingSeconds, isFinalSurvivorCapture, metersBetween, parseRules, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds, shouldExposeCamper, stormShrinkMeters } from "./game-logic";
+import {
+  DEFAULT_RULES,
+  buildMatchRecap,
+  canViewSurvivorPing,
+  deriveRules,
+  distanceToSegmentMeters,
+  effectiveStormRadius,
+  elapsedGameSeconds,
+  headStartRemainingSeconds,
+  isFinalSurvivorCapture,
+  metersBetween,
+  parseRules,
+  roundedSquarePositionWithinBounds,
+  scheduledPingIntervalSeconds,
+  shouldExposeCamper,
+  stormShrinkMeters,
+} from "./game-logic";
 import { ENV } from "./_core/env";
-
 let _db: ReturnType<typeof drizzle> | null = null;
 const id = () => crypto.randomUUID().replace(/-/g, "");
-const token = () => crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
+const token = () =>
+  crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
 const MAX_MATCH_PLAYERS = 6;
 const activeGameTicks = new Map<string, Promise<void>>();
 const rejoinCode = () => {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  return Array.from({ length: 10 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
+  return Array.from(
+    { length: 10 },
+    () => alphabet[Math.floor(Math.random() * alphabet.length)]
+  ).join("");
 };
-
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) _db = drizzle(process.env.DATABASE_URL);
   return _db;
 }
-
 async function requireDb() {
   const db = await getDb();
   if (!db) throw new Error("The game database is unavailable.");
   return db;
 }
-
 export async function upsertUser(user: InsertUser): Promise<void> {
   const db = await getDb();
   if (!db) return;
@@ -47,38 +63,52 @@ export async function upsertUser(user: InsertUser): Promise<void> {
       updateSet[field] = user[field] ?? null;
     }
   }
-  values.role = user.role ?? (user.openId === ENV.ownerOpenId ? "admin" : "user");
+  values.role =
+    user.role ?? (user.openId === ENV.ownerOpenId ? "admin" : "user");
   updateSet.role = values.role;
-  await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
+  await db
+    .insert(users)
+    .values(values)
+    .onDuplicateKeyUpdate({ set: updateSet });
 }
-
 export async function getUserByOpenId(openId: string) {
   const db = await getDb();
   if (!db) return undefined;
-  return (await db.select().from(users).where(eq(users.openId, openId)).limit(1))[0];
+  return (
+    await db.select().from(users).where(eq(users.openId, openId)).limit(1)
+  )[0];
 }
-
 async function makeJoinCode() {
   const db = await requireDb();
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   for (let attempt = 0; attempt < 8; attempt++) {
-    const code = Array.from({ length: 6 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
-    const existing = await db.select({ id: games.id }).from(games).where(eq(games.joinCode, code)).limit(1);
+    const code = Array.from(
+      { length: 6 },
+      () => alphabet[Math.floor(Math.random() * alphabet.length)]
+    ).join("");
+    const existing = await db
+      .select({ id: games.id })
+      .from(games)
+      .where(eq(games.joinCode, code))
+      .limit(1);
     if (!existing.length) return code;
   }
   throw new Error("Could not reserve a join code. Please try again.");
 }
-
-export type GuestSession = { gameId: string; playerToken: string };
-
-export async function createGame(displayName: string, profileImageKey?: string) {
+export type GuestSession = {
+  gameId: string;
+  playerToken: string;
+};
+export async function createGame(
+  displayName: string,
+  profileImageKey?: string
+) {
   const db = await requireDb();
   const gameId = id();
   const hostPlayerId = id();
   const playerToken = token();
   const hostRejoinCode = rejoinCode();
   const joinCode = await makeJoinCode();
-  // The University of Adelaide, North Terrace campus — hosts can replace this with GPS in setup.
   const defaultCenter = { lat: -34.92051, lng: 138.60456 };
   await db.insert(games).values({
     id: gameId,
@@ -103,347 +133,894 @@ export async function createGame(displayName: string, profileImageKey?: string) 
     isHost: true,
     role: "survivor",
   });
-  await addEvent(gameId, "game_created", hostPlayerId, null, "public", { name: displayName });
-  return { joinCode, gameId, playerToken, playerId: hostPlayerId, rejoinCode: hostRejoinCode };
+  await addEvent(gameId, "game_created", hostPlayerId, null, "public", {
+    name: displayName,
+  });
+  return {
+    joinCode,
+    gameId,
+    playerToken,
+    playerId: hostPlayerId,
+    rejoinCode: hostRejoinCode,
+  };
 }
-
-export async function joinGame(joinCode: string, displayName: string, profileImageKey?: string) {
+export async function joinGame(
+  joinCode: string,
+  displayName: string,
+  profileImageKey?: string
+) {
   const db = await requireDb();
-  const game = (await db.select().from(games).where(eq(games.joinCode, joinCode)).limit(1))[0];
+  const game = (
+    await db.select().from(games).where(eq(games.joinCode, joinCode)).limit(1)
+  )[0];
   if (!game) throw new Error("That join code does not exist.");
-  if (game.status === "running" || game.status === "finished") throw new Error("This match is not accepting new players.");
-  const existingPlayers = await db.select({ id: gamePlayers.id }).from(gamePlayers).where(eq(gamePlayers.gameId, game.id));
-  if (existingPlayers.length >= MAX_MATCH_PLAYERS) throw new Error(`This lobby is full (maximum ${MAX_MATCH_PLAYERS} players).`);
+  if (game.status === "running" || game.status === "finished")
+    throw new Error("This match is not accepting new players.");
+  const existingPlayers = await db
+    .select({ id: gamePlayers.id })
+    .from(gamePlayers)
+    .where(eq(gamePlayers.gameId, game.id));
+  if (existingPlayers.length >= MAX_MATCH_PLAYERS)
+    throw new Error(
+      `This lobby is full (maximum ${MAX_MATCH_PLAYERS} players).`
+    );
   const playerId = id();
   const playerToken = token();
   const playerRejoinCode = rejoinCode();
-  await db.insert(gamePlayers).values({ id: playerId, gameId: game.id, guestToken: playerToken, rejoinCode: playerRejoinCode, displayName, profileImageKey: profileImageKey ?? null, role: "survivor" });
-  await addEvent(game.id, "player_joined", playerId, null, "public", { name: displayName });
-  return { joinCode: game.joinCode, gameId: game.id, playerToken, playerId, rejoinCode: playerRejoinCode };
+  await db.insert(gamePlayers).values({
+    id: playerId,
+    gameId: game.id,
+    guestToken: playerToken,
+    rejoinCode: playerRejoinCode,
+    displayName,
+    profileImageKey: profileImageKey ?? null,
+    role: "survivor",
+  });
+  await addEvent(game.id, "player_joined", playerId, null, "public", {
+    name: displayName,
+  });
+  return {
+    joinCode: game.joinCode,
+    gameId: game.id,
+    playerToken,
+    playerId,
+    rejoinCode: playerRejoinCode,
+  };
 }
-
 export async function rejoinGame(joinCode: string, recoveryCode: string) {
   const db = await requireDb();
-  const game = (await db.select().from(games).where(eq(games.joinCode, joinCode)).limit(1))[0];
+  const game = (
+    await db.select().from(games).where(eq(games.joinCode, joinCode)).limit(1)
+  )[0];
   if (!game) throw new Error("That join code does not exist.");
-  const player = (await db.select().from(gamePlayers).where(and(eq(gamePlayers.gameId, game.id), eq(gamePlayers.rejoinCode, recoveryCode))).limit(1))[0];
+  const player = (
+    await db
+      .select()
+      .from(gamePlayers)
+      .where(
+        and(
+          eq(gamePlayers.gameId, game.id),
+          eq(gamePlayers.rejoinCode, recoveryCode)
+        )
+      )
+      .limit(1)
+  )[0];
   if (!player) throw new Error("That recovery code does not match this game.");
   const playerToken = token();
-  await db.update(gamePlayers).set({ guestToken: playerToken, status: player.status === "disconnected" ? "active" : player.status }).where(eq(gamePlayers.id, player.id));
-  await addEvent(game.id, "player_rejoined", player.id, null, "public", { name: player.displayName });
-  return { joinCode: game.joinCode, gameId: game.id, playerToken, playerId: player.id, rejoinCode: player.rejoinCode };
+  await db
+    .update(gamePlayers)
+    .set({
+      guestToken: playerToken,
+      status: player.status === "disconnected" ? "active" : player.status,
+    })
+    .where(eq(gamePlayers.id, player.id));
+  await addEvent(game.id, "player_rejoined", player.id, null, "public", {
+    name: player.displayName,
+  });
+  return {
+    joinCode: game.joinCode,
+    gameId: game.id,
+    playerToken,
+    playerId: player.id,
+    rejoinCode: player.rejoinCode,
+  };
 }
-
 export async function getSessionPlayer(session: GuestSession) {
   const db = await requireDb();
-  const player = (await db.select().from(gamePlayers).where(and(eq(gamePlayers.gameId, session.gameId), eq(gamePlayers.guestToken, session.playerToken))).limit(1))[0];
-  if (!player) throw new Error("This game session has expired. Rejoin with the lobby code.");
+  const player = (
+    await db
+      .select()
+      .from(gamePlayers)
+      .where(
+        and(
+          eq(gamePlayers.gameId, session.gameId),
+          eq(gamePlayers.guestToken, session.playerToken)
+        )
+      )
+      .limit(1)
+  )[0];
+  if (!player)
+    throw new Error(
+      "This game session has expired. Rejoin with the lobby code."
+    );
   return player;
 }
-
 export async function addEvent(
   gameId: string,
   type: string,
   actorPlayerId: string | null,
   targetPlayerId: string | null,
   visibility: "public" | "host" | "target" | "zombies" | "survivors",
-  payload: Record<string, unknown> = {},
+  payload: Record<string, unknown> = {}
 ) {
   const db = await requireDb();
-  await db.insert(gameEvents).values({ id: id(), gameId, type, actorPlayerId, targetPlayerId, visibility, payloadJson: JSON.stringify(payload) });
+  await db.insert(gameEvents).values({
+    id: id(),
+    gameId,
+    type,
+    actorPlayerId,
+    targetPlayerId,
+    visibility,
+    payloadJson: JSON.stringify(payload),
+  });
 }
-
 function parseEventPayload(payloadJson?: string | null) {
   if (!payloadJson) return {};
   try {
     const payload = JSON.parse(payloadJson);
     return payload && typeof payload === "object" ? payload : {};
   } catch {
-    // One malformed historical event must never take a live match offline.
     return {};
   }
 }
-
-export async function updateSetup(session: GuestSession, setup: { centerLat: number; centerLng: number; initialRadius: number; minimumRadius: number; matchMinutes: number; videoIntervalMinutes: number; points: Array<{ id?: string; type: "extraction" | "powerup_candidate"; label: string; lat: number; lng: number }> }) {
+export async function updateSetup(
+  session: GuestSession,
+  setup: {
+    centerLat: number;
+    centerLng: number;
+    initialRadius: number;
+    minimumRadius: number;
+    matchMinutes: number;
+    videoIntervalMinutes: number;
+    points: Array<{
+      id?: string;
+      type: "extraction" | "powerup_candidate";
+      label: string;
+      lat: number;
+      lng: number;
+    }>;
+  }
+) {
   const db = await requireDb();
   const player = await getSessionPlayer(session);
-  if (!player.isHost) throw new Error("Only the host can configure the playing area.");
-  const existingGame = (await db.select().from(games).where(eq(games.id, session.gameId)).limit(1))[0];
-  if (!existingGame || !["setup", "lobby"].includes(existingGame.status)) throw new Error("This game can no longer be configured.");
-  if (setup.minimumRadius > setup.initialRadius) throw new Error("The minimum radius cannot exceed the starting radius.");
-  const extractionPoints = setup.points.filter(point => point.type === "extraction");
-  if (extractionPoints.length < 2 || extractionPoints.length > 4) throw new Error("Place between two and four potential extraction points.");
-  if (extractionPoints.some(point => !roundedSquarePositionWithinBounds({ lat: setup.centerLat, lng: setup.centerLng }, point, setup.minimumRadius, 20))) {
-    throw new Error("Extraction points must fit inside the smallest rounded-square zone.");
+  if (!player.isHost)
+    throw new Error("Only the host can configure the playing area.");
+  const existingGame = (
+    await db.select().from(games).where(eq(games.id, session.gameId)).limit(1)
+  )[0];
+  if (!existingGame || !["setup", "lobby"].includes(existingGame.status))
+    throw new Error("This game can no longer be configured.");
+  if (setup.minimumRadius > setup.initialRadius)
+    throw new Error("The minimum radius cannot exceed the starting radius.");
+  const extractionPoints = setup.points.filter(
+    point => point.type === "extraction"
+  );
+  if (extractionPoints.length < 2 || extractionPoints.length > 4)
+    throw new Error("Place between two and four potential extraction points.");
+  if (
+    extractionPoints.some(
+      point =>
+        !roundedSquarePositionWithinBounds(
+          { lat: setup.centerLat, lng: setup.centerLng },
+          point,
+          setup.minimumRadius,
+          20
+        )
+    )
+  ) {
+    throw new Error(
+      "Extraction points must fit inside the smallest rounded-square zone."
+    );
   }
-  await db.update(games).set({
-    centerLat: setup.centerLat,
-    centerLng: setup.centerLng,
-    initialRadius: setup.initialRadius,
-    minimumRadius: setup.minimumRadius,
-    currentRadius: setup.initialRadius,
-    rulesJson: JSON.stringify(deriveRules(setup.matchMinutes, setup.videoIntervalMinutes)),
-    briefingOpenedAt: null,
-    status: "lobby",
-  }).where(eq(games.id, session.gameId));
+  await db
+    .update(games)
+    .set({
+      centerLat: setup.centerLat,
+      centerLng: setup.centerLng,
+      initialRadius: setup.initialRadius,
+      minimumRadius: setup.minimumRadius,
+      currentRadius: setup.initialRadius,
+      rulesJson: JSON.stringify(
+        deriveRules(setup.matchMinutes, setup.videoIntervalMinutes)
+      ),
+      briefingOpenedAt: null,
+      status: "lobby",
+    })
+    .where(eq(games.id, session.gameId));
   await db.delete(gamePoints).where(eq(gamePoints.gameId, session.gameId));
   if (setup.points.length) {
-    await db.insert(gamePoints).values(setup.points.map(point => ({
-      id: point.id ?? id(), gameId: session.gameId, type: point.type, label: point.label, lat: point.lat, lng: point.lng, isActive: false,
-    })));
+    await db.insert(gamePoints).values(
+      setup.points.map(point => ({
+        id: point.id ?? id(),
+        gameId: session.gameId,
+        type: point.type,
+        label: point.label,
+        lat: point.lat,
+        lng: point.lng,
+        isActive: false,
+      }))
+    );
   }
-  await addEvent(session.gameId, "setup_saved", player.id, null, "public", { points: setup.points.length });
+  await addEvent(session.gameId, "setup_saved", player.id, null, "public", {
+    points: setup.points.length,
+  });
 }
-
 export async function setReady(session: GuestSession, isReady: boolean) {
   const db = await requireDb();
   const player = await getSessionPlayer(session);
-  const game = (await db.select({ status: games.status }).from(games).where(eq(games.id, session.gameId)).limit(1))[0];
-  if (!game || game.status !== "lobby") throw new Error("Readiness can only change while the lobby is open.");
-  await db.update(gamePlayers).set({ isReady }).where(eq(gamePlayers.id, player.id));
-  await addEvent(session.gameId, isReady ? "ready" : "not_ready", player.id, null, "public", { name: player.displayName });
+  const game = (
+    await db
+      .select({ status: games.status })
+      .from(games)
+      .where(eq(games.id, session.gameId))
+      .limit(1)
+  )[0];
+  if (!game || game.status !== "lobby")
+    throw new Error("Readiness can only change while the lobby is open.");
+  await db
+    .update(gamePlayers)
+    .set({ isReady })
+    .where(eq(gamePlayers.id, player.id));
+  await addEvent(
+    session.gameId,
+    isReady ? "ready" : "not_ready",
+    player.id,
+    null,
+    "public",
+    { name: player.displayName }
+  );
 }
-
-export async function assignZombie(session: GuestSession, playerId: string, isZombie: boolean) {
+export async function assignZombie(
+  session: GuestSession,
+  playerId: string,
+  isZombie: boolean
+) {
   const db = await requireDb();
   const host = await getSessionPlayer(session);
-  if (!host.isHost) throw new Error("Only the host can assign the initial zombie.");
-  const game = (await db.select({ status: games.status }).from(games).where(eq(games.id, session.gameId)).limit(1))[0];
-  if (!game || game.status !== "lobby") throw new Error("Roles can only be chosen while the lobby is open.");
-  const target = (await db.select().from(gamePlayers).where(and(eq(gamePlayers.id, playerId), eq(gamePlayers.gameId, session.gameId))).limit(1))[0];
+  if (!host.isHost)
+    throw new Error("Only the host can assign the initial zombie.");
+  const game = (
+    await db
+      .select({ status: games.status })
+      .from(games)
+      .where(eq(games.id, session.gameId))
+      .limit(1)
+  )[0];
+  if (!game || game.status !== "lobby")
+    throw new Error("Roles can only be chosen while the lobby is open.");
+  const target = (
+    await db
+      .select()
+      .from(gamePlayers)
+      .where(
+        and(
+          eq(gamePlayers.id, playerId),
+          eq(gamePlayers.gameId, session.gameId)
+        )
+      )
+      .limit(1)
+  )[0];
   if (!target) throw new Error("Player not found.");
-  await db.update(gamePlayers).set({ role: isZombie ? "zombie" : "survivor" }).where(eq(gamePlayers.id, playerId));
+  await db
+    .update(gamePlayers)
+    .set({ role: isZombie ? "zombie" : "survivor" })
+    .where(eq(gamePlayers.id, playerId));
 }
-
 export async function openBriefing(session: GuestSession) {
   const db = await requireDb();
   const host = await getSessionPlayer(session);
-  if (!host.isHost) throw new Error("Only the host can open the mission briefing.");
-  const game = (await db.select().from(games).where(eq(games.id, session.gameId)).limit(1))[0];
-  if (!game || game.status !== "lobby") throw new Error("The briefing is only available from the lobby.");
-  const players = await db.select().from(gamePlayers).where(eq(gamePlayers.gameId, session.gameId));
-  if (players.length < 2) throw new Error("At least two players are needed to open the briefing.");
-  if (players.some(player => !player.isReady)) throw new Error("Every player, including the host, must be ready before the briefing.");
-  await db.update(games).set({ briefingOpenedAt: new Date() }).where(eq(games.id, session.gameId));
-  await addEvent(session.gameId, "briefing_opened", host.id, null, "public", {});
+  if (!host.isHost)
+    throw new Error("Only the host can open the mission briefing.");
+  const game = (
+    await db.select().from(games).where(eq(games.id, session.gameId)).limit(1)
+  )[0];
+  if (!game || game.status !== "lobby")
+    throw new Error("The briefing is only available from the lobby.");
+  const players = await db
+    .select()
+    .from(gamePlayers)
+    .where(eq(gamePlayers.gameId, session.gameId));
+  if (players.length < 2)
+    throw new Error("At least two players are needed to open the briefing.");
+  if (players.some(player => !player.isReady))
+    throw new Error(
+      "Every player, including the host, must be ready before the briefing."
+    );
+  await db
+    .update(games)
+    .set({ briefingOpenedAt: new Date() })
+    .where(eq(games.id, session.gameId));
+  await addEvent(
+    session.gameId,
+    "briefing_opened",
+    host.id,
+    null,
+    "public",
+    {}
+  );
 }
-
 export async function startGame(session: GuestSession) {
   const db = await requireDb();
   const host = await getSessionPlayer(session);
   if (!host.isHost) throw new Error("Only the host can start the match.");
-  const game = (await db.select().from(games).where(eq(games.id, session.gameId)).limit(1))[0];
-  if (!game || game.status !== "lobby") throw new Error("This match cannot be started.");
-  if (!game.briefingOpenedAt) throw new Error("Open the mission briefing for the whole team before starting.");
-  const players = await db.select().from(gamePlayers).where(eq(gamePlayers.gameId, session.gameId));
-  if (players.length < 2) throw new Error("At least two players are needed to start.");
-  if (players.some(player => !player.isReady)) throw new Error("Every player, including the host, must grant field access and mark ready.");
+  const game = (
+    await db.select().from(games).where(eq(games.id, session.gameId)).limit(1)
+  )[0];
+  if (!game || game.status !== "lobby")
+    throw new Error("This match cannot be started.");
+  if (!game.briefingOpenedAt)
+    throw new Error(
+      "Open the mission briefing for the whole team before starting."
+    );
+  const players = await db
+    .select()
+    .from(gamePlayers)
+    .where(eq(gamePlayers.gameId, session.gameId));
+  if (players.length < 2)
+    throw new Error("At least two players are needed to start.");
+  if (players.some(player => !player.isReady))
+    throw new Error(
+      "Every player, including the host, must grant field access and mark ready."
+    );
   let zombies = players.filter(player => player.role === "zombie");
   if (!zombies.length) {
     const chosen = players[Math.floor(Math.random() * players.length)];
-    await db.update(gamePlayers).set({ role: "zombie" }).where(eq(gamePlayers.id, chosen.id));
+    await db
+      .update(gamePlayers)
+      .set({ role: "zombie" })
+      .where(eq(gamePlayers.id, chosen.id));
     zombies = [chosen];
   }
-  if (!players.some(player => player.role === "survivor")) throw new Error("Keep at least one survivor in the match.");
+  if (!players.some(player => player.role === "survivor"))
+    throw new Error("Keep at least one survivor in the match.");
   const now = new Date();
-  await db.update(gamePoints).set({ isActive: false }).where(and(eq(gamePoints.gameId, session.gameId), eq(gamePoints.type, "extraction")));
+  await db
+    .update(gamePoints)
+    .set({ isActive: false })
+    .where(
+      and(
+        eq(gamePoints.gameId, session.gameId),
+        eq(gamePoints.type, "extraction")
+      )
+    );
   const rules = parseRules(game.rulesJson);
-  await db.update(games).set({
-    status: "running", startedAt: now, pausedAt: null, pausedSeconds: 0,
-    nextPingAt: new Date(now.getTime() + scheduledPingIntervalSeconds(rules, players.filter(player => player.role === "survivor").length) * 1_000),
-    nextVideoAt: new Date(now.getTime() + rules.videoIntervalSeconds * 1_000),
-    lastCaptureAt: now, stormPhase: "normal", stormPhaseEndsAt: null, lastItemSpawnAt: now, winner: null, finishedAt: null,
-  }).where(eq(games.id, session.gameId));
-  await db.update(gamePlayers).set({ status: "active", extractionStartedAt: null, boundaryOutsideSince: null, boundaryExposed: false, lastPingLat: null, lastPingLng: null, lastPingAt: null, lastPingExpiresAt: null, campAnchorLat: null, campAnchorLng: null, campAnchorAt: null, videoDueAt: null, videoUploadDeadlineAt: null, videoExposureUntil: null }).where(eq(gamePlayers.gameId, session.gameId));
-  await addEvent(session.gameId, "match_started", host.id, null, "public", { headStartSeconds: rules.headStartSeconds, extractionOpensAtSeconds: rules.extractionOpensAtSeconds, matchSeconds: rules.matchSeconds, pingIntervalSeconds: 60, videoIntervalSeconds: rules.videoIntervalSeconds });
+  await db
+    .update(games)
+    .set({
+      status: "running",
+      startedAt: now,
+      pausedAt: null,
+      pausedSeconds: 0,
+      nextPingAt: new Date(
+        now.getTime() +
+          scheduledPingIntervalSeconds(
+            rules,
+            players.filter(player => player.role === "survivor").length
+          ) *
+            1000
+      ),
+      nextVideoAt: new Date(now.getTime() + rules.videoIntervalSeconds * 1000),
+      lastCaptureAt: now,
+      stormPhase: "normal",
+      stormPhaseEndsAt: null,
+      lastItemSpawnAt: now,
+      winner: null,
+      finishedAt: null,
+    })
+    .where(eq(games.id, session.gameId));
+  await db
+    .update(gamePlayers)
+    .set({
+      status: "active",
+      extractionStartedAt: null,
+      boundaryOutsideSince: null,
+      boundaryExposed: false,
+      lastPingLat: null,
+      lastPingLng: null,
+      lastPingAt: null,
+      lastPingExpiresAt: null,
+      campAnchorLat: null,
+      campAnchorLng: null,
+      campAnchorAt: null,
+      videoDueAt: null,
+      videoUploadDeadlineAt: null,
+      videoExposureUntil: null,
+    })
+    .where(eq(gamePlayers.gameId, session.gameId));
+  await addEvent(session.gameId, "match_started", host.id, null, "public", {
+    headStartSeconds: rules.headStartSeconds,
+    extractionOpensAtSeconds: rules.extractionOpensAtSeconds,
+    matchSeconds: rules.matchSeconds,
+    pingIntervalSeconds: 60,
+    videoIntervalSeconds: rules.videoIntervalSeconds,
+  });
 }
-
 export async function pauseGame(session: GuestSession, paused: boolean) {
   const db = await requireDb();
   const host = await getSessionPlayer(session);
   if (!host.isHost) throw new Error("Only the host can pause or resume.");
-  const game = (await db.select().from(games).where(eq(games.id, session.gameId)).limit(1))[0];
+  const game = (
+    await db.select().from(games).where(eq(games.id, session.gameId)).limit(1)
+  )[0];
   if (!game) throw new Error("Game not found.");
   const now = new Date();
   if (paused && game.status === "running") {
-    await db.update(games).set({ status: "paused", pausedAt: now }).where(eq(games.id, game.id));
+    await db
+      .update(games)
+      .set({ status: "paused", pausedAt: now })
+      .where(eq(games.id, game.id));
   } else if (!paused && game.status === "paused") {
-    const pausedFor = game.pausedAt ? Math.round((now.getTime() - game.pausedAt.getTime()) / 1000) : 0;
-    await db.update(games).set({ status: "running", pausedAt: null, pausedSeconds: game.pausedSeconds + pausedFor }).where(eq(games.id, game.id));
+    const pausedFor = game.pausedAt
+      ? Math.round((now.getTime() - game.pausedAt.getTime()) / 1000)
+      : 0;
+    await db
+      .update(games)
+      .set({
+        status: "running",
+        pausedAt: null,
+        pausedSeconds: game.pausedSeconds + pausedFor,
+      })
+      .where(eq(games.id, game.id));
   } else {
     throw new Error("This game cannot be paused or resumed right now.");
   }
-  await addEvent(session.gameId, paused ? "match_paused" : "match_resumed", host.id, null, "public", {});
+  await addEvent(
+    session.gameId,
+    paused ? "match_paused" : "match_resumed",
+    host.id,
+    null,
+    "public",
+    {}
+  );
 }
-
-/** Allows the host to end a lobby or active field session with an explicit broadcast. */
 export async function stopGame(session: GuestSession) {
   const db = await requireDb();
   const host = await getSessionPlayer(session);
   if (!host.isHost) throw new Error("Only the host can stop the game.");
-  const game = (await db.select().from(games).where(eq(games.id, session.gameId)).limit(1))[0];
+  const game = (
+    await db.select().from(games).where(eq(games.id, session.gameId)).limit(1)
+  )[0];
   if (!game) throw new Error("Game not found.");
-  if (game.status === "finished") throw new Error("This game has already ended.");
+  if (game.status === "finished")
+    throw new Error("This game has already ended.");
   const now = new Date();
-  await db.update(games).set({ status: "finished", winner: null, finishedAt: now, pausedAt: null }).where(eq(games.id, game.id));
-  await addEvent(session.gameId, game.status === "running" || game.status === "paused" ? "match_stopped" : "lobby_cancelled", host.id, null, "public", { by: host.displayName });
+  await db
+    .update(games)
+    .set({ status: "finished", winner: null, finishedAt: now, pausedAt: null })
+    .where(eq(games.id, game.id));
+  await addEvent(
+    session.gameId,
+    game.status === "running" || game.status === "paused"
+      ? "match_stopped"
+      : "lobby_cancelled",
+    host.id,
+    null,
+    "public",
+    { by: host.displayName }
+  );
 }
-
 export async function tickGame(gameId: string) {
-  // Several phones can poll and report location at the same moment. Coalescing the
-  // work avoids concurrent state transitions and keeps serverless requests lightweight.
   const existing = activeGameTicks.get(gameId);
   if (existing) return existing;
-  const work = tickGameOnce(gameId).finally(() => activeGameTicks.delete(gameId));
+  const work = tickGameOnce(gameId).finally(() =>
+    activeGameTicks.delete(gameId)
+  );
   activeGameTicks.set(gameId, work);
   return work;
 }
-
 async function tickGameOnce(gameId: string) {
   const db = await requireDb();
-  const game = (await db.select().from(games).where(eq(games.id, gameId)).limit(1))[0];
+  const game = (
+    await db.select().from(games).where(eq(games.id, gameId)).limit(1)
+  )[0];
   if (!game || game.status !== "running") return;
   const now = new Date();
   const rules = parseRules(game.rulesJson);
   const elapsed = elapsedGameSeconds(game.startedAt, game.pausedSeconds, now);
   if (elapsed >= rules.matchSeconds) {
-    await db.update(games).set({ status: "finished", winner: "zombies", finishedAt: now }).where(eq(games.id, game.id));
-    await addEvent(game.id, "match_finished", null, null, "public", { winner: "zombies", reason: "time_expired" });
+    await db
+      .update(games)
+      .set({ status: "finished", winner: "zombies", finishedAt: now })
+      .where(eq(games.id, game.id));
+    await addEvent(game.id, "match_finished", null, null, "public", {
+      winner: "zombies",
+      reason: "time_expired",
+    });
     return;
   }
-  const players = await db.select().from(gamePlayers).where(eq(gamePlayers.gameId, game.id));
+  const players = await db
+    .select()
+    .from(gamePlayers)
+    .where(eq(gamePlayers.gameId, game.id));
   if (
     elapsed > 180 &&
-    players.some(player =>
-      player.status === "active" &&
-      (!player.lastLocationAt || now.getTime() - player.lastLocationAt.getTime() > 180_000),
+    players.some(
+      player =>
+        player.status === "active" &&
+        (!player.lastLocationAt ||
+          now.getTime() - player.lastLocationAt.getTime() > 180000)
     )
   ) {
-    await db.update(games).set({ status: "paused", pausedAt: now }).where(eq(games.id, game.id));
-    await addEvent(game.id, "safety_pause", null, null, "public", { reason: "location_stale" });
+    await db
+      .update(games)
+      .set({ status: "paused", pausedAt: now })
+      .where(eq(games.id, game.id));
+    await addEvent(game.id, "safety_pause", null, null, "public", {
+      reason: "location_stale",
+    });
     return;
   }
-  const turningPlayers = players.filter(player => player.status === "turning" && player.turnEndsAt && player.turnEndsAt <= now);
+  const turningPlayers = players.filter(
+    player =>
+      player.status === "turning" &&
+      player.turnEndsAt &&
+      player.turnEndsAt <= now
+  );
   for (const player of turningPlayers) {
-    await db.update(gamePlayers).set({ role: "zombie", status: "active", inventory: null, videoSkipArmed: false, turnEndsAt: null }).where(eq(gamePlayers.id, player.id));
-    await addEvent(game.id, "player_turned", player.id, null, "public", { name: player.displayName });
+    await db
+      .update(gamePlayers)
+      .set({
+        role: "zombie",
+        status: "active",
+        inventory: null,
+        videoSkipArmed: false,
+        turnEndsAt: null,
+      })
+      .where(eq(gamePlayers.id, player.id));
+    await addEvent(game.id, "player_turned", player.id, null, "public", {
+      name: player.displayName,
+    });
   }
-  const resolvedPlayers = turningPlayers.length ? await db.select().from(gamePlayers).where(eq(gamePlayers.gameId, game.id)) : players;
-  const survivors = resolvedPlayers.filter(player => player.role === "survivor" && player.status === "active");
-  const remainingSurvivors = resolvedPlayers.filter(player => player.role === "survivor" && (player.status === "active" || player.status === "turning"));
+  const resolvedPlayers = turningPlayers.length
+    ? await db.select().from(gamePlayers).where(eq(gamePlayers.gameId, game.id))
+    : players;
+  const survivors = resolvedPlayers.filter(
+    player => player.role === "survivor" && player.status === "active"
+  );
+  const remainingSurvivors = resolvedPlayers.filter(
+    player =>
+      player.role === "survivor" &&
+      (player.status === "active" || player.status === "turning")
+  );
   if (!remainingSurvivors.length) {
-    await db.update(games).set({ status: "finished", winner: "zombies", finishedAt: now }).where(eq(games.id, game.id));
-    await addEvent(game.id, "match_finished", null, null, "public", { winner: "zombies", reason: "no_survivors" });
+    await db
+      .update(games)
+      .set({ status: "finished", winner: "zombies", finishedAt: now })
+      .where(eq(games.id, game.id));
+    await addEvent(game.id, "match_finished", null, null, "public", {
+      winner: "zombies",
+      reason: "no_survivors",
+    });
     return;
   }
   if (elapsed >= rules.extractionOpensAtSeconds) {
-    const extractionPoints = await db.select().from(gamePoints).where(and(eq(gamePoints.gameId, game.id), eq(gamePoints.type, "extraction")));
-    if (!extractionPoints.some(point => point.isActive) && extractionPoints.length >= 2) {
+    const extractionPoints = await db
+      .select()
+      .from(gamePoints)
+      .where(
+        and(eq(gamePoints.gameId, game.id), eq(gamePoints.type, "extraction"))
+      );
+    if (
+      !extractionPoints.some(point => point.isActive) &&
+      extractionPoints.length >= 2
+    ) {
       const selected = [...extractionPoints]
         .sort(() => Math.random() - 0.5)
         .slice(0, 2);
-      await Promise.all(selected.map(point => db.update(gamePoints).set({ isActive: true }).where(eq(gamePoints.id, point.id))));
-      await addEvent(game.id, "extraction_points_revealed", null, null, "public", { points: selected.map(point => point.label) });
+      await Promise.all(
+        selected.map(point =>
+          db
+            .update(gamePoints)
+            .set({ isActive: true })
+            .where(eq(gamePoints.id, point.id))
+        )
+      );
+      await addEvent(
+        game.id,
+        "extraction_points_revealed",
+        null,
+        null,
+        "public",
+        { points: selected.map(point => point.label) }
+      );
     }
   }
   if (game.nextPingAt && game.nextPingAt <= now) {
-    const next = new Date(now.getTime() + scheduledPingIntervalSeconds(rules, survivors.length) * 1_000);
-    const reservation = await db.update(games).set({ nextPingAt: next }).where(and(eq(games.id, game.id), lte(games.nextPingAt, now)));
+    const next = new Date(
+      now.getTime() +
+        scheduledPingIntervalSeconds(rules, survivors.length) * 1000
+    );
+    const reservation = await db
+      .update(games)
+      .set({ nextPingAt: next })
+      .where(and(eq(games.id, game.id), lte(games.nextPingAt, now)));
     if (!(reservation as any)[0]?.affectedRows) return;
     for (const player of survivors) {
       if (player.lastLat !== null && player.lastLng !== null) {
-        await db.update(gamePlayers).set({ lastPingLat: player.lastLat, lastPingLng: player.lastLng, lastPingAt: now, lastPingExpiresAt: new Date(now.getTime() + 35_000) }).where(eq(gamePlayers.id, player.id));
+        await db
+          .update(gamePlayers)
+          .set({
+            lastPingLat: player.lastLat,
+            lastPingLng: player.lastLng,
+            lastPingAt: now,
+            lastPingExpiresAt: new Date(now.getTime() + 35000),
+          })
+          .where(eq(gamePlayers.id, player.id));
       }
     }
-    await addEvent(game.id, "survivor_ping", null, null, "public", { survivorCount: survivors.length, nextPingAt: next.toISOString() });
+    await addEvent(game.id, "survivor_ping", null, null, "public", {
+      survivorCount: survivors.length,
+      nextPingAt: next.toISOString(),
+    });
   }
   if (game.nextVideoAt && game.nextVideoAt <= now) {
-    const nextVideoAt = new Date(now.getTime() + rules.videoIntervalSeconds * 1_000);
-    const reservation = await db.update(games).set({ nextVideoAt }).where(and(eq(games.id, game.id), lte(games.nextVideoAt, now)));
+    const nextVideoAt = new Date(
+      now.getTime() + rules.videoIntervalSeconds * 1000
+    );
+    const reservation = await db
+      .update(games)
+      .set({ nextVideoAt })
+      .where(and(eq(games.id, game.id), lte(games.nextVideoAt, now)));
     if (!(reservation as any)[0]?.affectedRows) return;
     for (const player of survivors) {
       if (player.videoSkipArmed) {
-        await db.update(gamePlayers).set({ videoSkipArmed: false }).where(eq(gamePlayers.id, player.id));
-        await addEvent(game.id, "video_skip_used", player.id, player.id, "target", {});
+        await db
+          .update(gamePlayers)
+          .set({ videoSkipArmed: false })
+          .where(eq(gamePlayers.id, player.id));
+        await addEvent(
+          game.id,
+          "video_skip_used",
+          player.id,
+          player.id,
+          "target",
+          {}
+        );
       } else {
-        await db.update(gamePlayers).set({ videoDueAt: now, videoUploadDeadlineAt: new Date(now.getTime() + 30_000), videoExposureUntil: null }).where(eq(gamePlayers.id, player.id));
+        await db
+          .update(gamePlayers)
+          .set({
+            videoDueAt: now,
+            videoUploadDeadlineAt: new Date(now.getTime() + 30000),
+            videoExposureUntil: null,
+          })
+          .where(eq(gamePlayers.id, player.id));
       }
     }
-    await addEvent(game.id, "video_requested", null, null, "survivors", { deadlineSeconds: 30, nextVideoAt: nextVideoAt.toISOString() });
+    await addEvent(game.id, "video_requested", null, null, "survivors", {
+      deadlineSeconds: 30,
+      nextVideoAt: nextVideoAt.toISOString(),
+    });
   }
-  for (const player of players.filter(player => player.videoUploadDeadlineAt && player.videoUploadDeadlineAt <= now)) {
+  for (const player of players.filter(
+    player =>
+      player.videoUploadDeadlineAt && player.videoUploadDeadlineAt <= now
+  )) {
     const canPing = player.lastLat !== null && player.lastLng !== null;
-    await db.update(gamePlayers).set({
-      videoDueAt: null,
-      videoUploadDeadlineAt: null,
-      videoExposureUntil: null,
-      lastPingLat: canPing ? player.lastLat : player.lastPingLat,
-      lastPingLng: canPing ? player.lastLng : player.lastPingLng,
-      lastPingAt: canPing ? now : player.lastPingAt,
-      lastPingExpiresAt: canPing ? new Date(now.getTime() + 30_000) : player.lastPingExpiresAt,
-    }).where(eq(gamePlayers.id, player.id));
-    await addEvent(game.id, "video_missed_ping", player.id, null, "zombies", { name: player.displayName, pingSeconds: 30, lat: player.lastLat, lng: player.lastLng });
+    await db
+      .update(gamePlayers)
+      .set({
+        videoDueAt: null,
+        videoUploadDeadlineAt: null,
+        videoExposureUntil: null,
+        lastPingLat: canPing ? player.lastLat : player.lastPingLat,
+        lastPingLng: canPing ? player.lastLng : player.lastPingLng,
+        lastPingAt: canPing ? now : player.lastPingAt,
+        lastPingExpiresAt: canPing
+          ? new Date(now.getTime() + 30000)
+          : player.lastPingExpiresAt,
+      })
+      .where(eq(gamePlayers.id, player.id));
+    await addEvent(game.id, "video_missed_ping", player.id, null, "zombies", {
+      name: player.displayName,
+      pingSeconds: 30,
+      lat: player.lastLat,
+      lng: player.lastLng,
+    });
   }
-  for (const player of players.filter(player => player.videoExposureUntil && player.videoExposureUntil <= now)) {
-    await db.update(gamePlayers).set({ videoExposureUntil: null }).where(eq(gamePlayers.id, player.id));
+  for (const player of players.filter(
+    player => player.videoExposureUntil && player.videoExposureUntil <= now
+  )) {
+    await db
+      .update(gamePlayers)
+      .set({ videoExposureUntil: null })
+      .where(eq(gamePlayers.id, player.id));
   }
-  const secondsSinceCapture = game.lastCaptureAt ? (now.getTime() - game.lastCaptureAt.getTime()) / 1000 : 0;
-  // The red-zone pressure starts only after five full minutes of play.
-  if (elapsed >= rules.stormStartsAtSeconds && game.stormPhase === "normal" && secondsSinceCapture >= 120 && game.currentRadius > game.minimumRadius) {
-    const shrinkMeters = stormShrinkMeters(game.currentRadius, game.minimumRadius);
-    await db.update(games).set({ stormPhase: "warning", stormPhaseEndsAt: new Date(now.getTime() + 30_000) }).where(eq(games.id, game.id));
-    await addEvent(game.id, "storm_warning", null, null, "public", { seconds: 30, shrinkMeters });
-  } else if (game.stormPhase === "warning" && game.stormPhaseEndsAt && game.stormPhaseEndsAt <= now) {
-    const shrinkMeters = stormShrinkMeters(game.currentRadius, game.minimumRadius);
-    await db.update(games).set({ stormPhase: "contracting", stormPhaseEndsAt: new Date(now.getTime() + 30_000) }).where(eq(games.id, game.id));
-    await addEvent(game.id, "storm_contracting", null, null, "public", { percent: 15, shrinkMeters });
-  } else if (game.stormPhase === "contracting" && game.stormPhaseEndsAt && game.stormPhaseEndsAt <= now) {
+  const secondsSinceCapture = game.lastCaptureAt
+    ? (now.getTime() - game.lastCaptureAt.getTime()) / 1000
+    : 0;
+  if (
+    elapsed >= rules.stormStartsAtSeconds &&
+    game.stormPhase === "normal" &&
+    secondsSinceCapture >= 120 &&
+    game.currentRadius > game.minimumRadius
+  ) {
+    const shrinkMeters = stormShrinkMeters(
+      game.currentRadius,
+      game.minimumRadius
+    );
+    await db
+      .update(games)
+      .set({
+        stormPhase: "warning",
+        stormPhaseEndsAt: new Date(now.getTime() + 30000),
+      })
+      .where(eq(games.id, game.id));
+    await addEvent(game.id, "storm_warning", null, null, "public", {
+      seconds: 30,
+      shrinkMeters,
+    });
+  } else if (
+    game.stormPhase === "warning" &&
+    game.stormPhaseEndsAt &&
+    game.stormPhaseEndsAt <= now
+  ) {
+    const shrinkMeters = stormShrinkMeters(
+      game.currentRadius,
+      game.minimumRadius
+    );
+    await db
+      .update(games)
+      .set({
+        stormPhase: "contracting",
+        stormPhaseEndsAt: new Date(now.getTime() + 30000),
+      })
+      .where(eq(games.id, game.id));
+    await addEvent(game.id, "storm_contracting", null, null, "public", {
+      percent: 15,
+      shrinkMeters,
+    });
+  } else if (
+    game.stormPhase === "contracting" &&
+    game.stormPhaseEndsAt &&
+    game.stormPhaseEndsAt <= now
+  ) {
     const nextRadius = Math.max(game.minimumRadius, game.currentRadius * 0.85);
-    await db.update(games).set({ currentRadius: nextRadius, stormPhase: "normal", stormPhaseEndsAt: null, lastCaptureAt: now }).where(eq(games.id, game.id));
-    await addEvent(game.id, "storm_contracted", null, null, "public", { radius: nextRadius });
+    await db
+      .update(games)
+      .set({
+        currentRadius: nextRadius,
+        stormPhase: "normal",
+        stormPhaseEndsAt: null,
+        lastCaptureAt: now,
+      })
+      .where(eq(games.id, game.id));
+    await addEvent(game.id, "storm_contracted", null, null, "public", {
+      radius: nextRadius,
+    });
   }
-  if (elapsed >= rules.powerupStartsAtSeconds && (!game.lastItemSpawnAt || now.getTime() - game.lastItemSpawnAt.getTime() >= rules.powerupIntervalSeconds * 1_000)) {
-    const activeItems = await db.select().from(gameItems).where(and(eq(gameItems.gameId, game.id), eq(gameItems.status, "active"), gt(gameItems.expiresAt, now)));
-    const points = await db.select().from(gamePoints).where(and(eq(gamePoints.gameId, game.id), eq(gamePoints.type, "powerup_candidate")));
+  if (
+    elapsed >= rules.powerupStartsAtSeconds &&
+    (!game.lastItemSpawnAt ||
+      now.getTime() - game.lastItemSpawnAt.getTime() >=
+        rules.powerupIntervalSeconds * 1000)
+  ) {
+    const activeItems = await db
+      .select()
+      .from(gameItems)
+      .where(
+        and(
+          eq(gameItems.gameId, game.id),
+          eq(gameItems.status, "active"),
+          gt(gameItems.expiresAt, now)
+        )
+      );
+    const points = await db
+      .select()
+      .from(gamePoints)
+      .where(
+        and(
+          eq(gamePoints.gameId, game.id),
+          eq(gamePoints.type, "powerup_candidate")
+        )
+      );
     const effectiveRadius = effectiveStormRadius(game, now);
-    const announcedNextRadius = game.stormPhase === "normal" ? effectiveRadius : Math.max(game.minimumRadius, game.currentRadius * 0.85);
-    const eligible = points.filter(point => roundedSquarePositionWithinBounds({ lat: game.centerLat, lng: game.centerLng }, point, Math.min(effectiveRadius, announcedNextRadius)));
+    const announcedNextRadius =
+      game.stormPhase === "normal"
+        ? effectiveRadius
+        : Math.max(game.minimumRadius, game.currentRadius * 0.85);
+    const eligible = points.filter(point =>
+      roundedSquarePositionWithinBounds(
+        { lat: game.centerLat, lng: game.centerLng },
+        point,
+        Math.min(effectiveRadius, announcedNextRadius)
+      )
+    );
     if (activeItems.length < 2 && eligible.length) {
       const point = eligible[Math.floor(Math.random() * eligible.length)];
-      const faction: "survivor" | "zombie" = Math.random() > 0.5 ? "survivor" : "zombie";
-      const type: "hunt_scan" | "threat_scan" | "video_skip" = faction === "zombie" ? "hunt_scan" : Math.random() > 0.5 ? "threat_scan" : "video_skip";
-      await db.insert(gameItems).values({ id: id(), gameId: game.id, spawnPointId: point.id, faction, type, lat: point.lat, lng: point.lng, expiresAt: new Date(now.getTime() + 90_000) });
-      await addEvent(game.id, "powerup_spawned", null, null, faction === "zombie" ? "zombies" : "survivors", { faction, type });
+      const faction: "survivor" | "zombie" =
+        Math.random() > 0.5 ? "survivor" : "zombie";
+      const type: "hunt_scan" | "threat_scan" | "video_skip" =
+        faction === "zombie"
+          ? "hunt_scan"
+          : Math.random() > 0.5
+            ? "threat_scan"
+            : "video_skip";
+      await db.insert(gameItems).values({
+        id: id(),
+        gameId: game.id,
+        spawnPointId: point.id,
+        faction,
+        type,
+        lat: point.lat,
+        lng: point.lng,
+        expiresAt: new Date(now.getTime() + 90000),
+      });
+      await addEvent(
+        game.id,
+        "powerup_spawned",
+        null,
+        null,
+        faction === "zombie" ? "zombies" : "survivors",
+        { faction, type }
+      );
     }
-    await db.update(games).set({ lastItemSpawnAt: now }).where(eq(games.id, game.id));
+    await db
+      .update(games)
+      .set({ lastItemSpawnAt: now })
+      .where(eq(games.id, game.id));
   }
   const activeRadius = effectiveStormRadius(game, now);
-  const activeItems = await db.select().from(gameItems).where(and(eq(gameItems.gameId, game.id), eq(gameItems.status, "active")));
-  for (const item of activeItems.filter(item => item.expiresAt <= now || !roundedSquarePositionWithinBounds({ lat: game.centerLat, lng: game.centerLng }, item, activeRadius))) {
-    await db.update(gameItems).set({ status: "expired" }).where(eq(gameItems.id, item.id));
+  const activeItems = await db
+    .select()
+    .from(gameItems)
+    .where(and(eq(gameItems.gameId, game.id), eq(gameItems.status, "active")));
+  for (const item of activeItems.filter(
+    item =>
+      item.expiresAt <= now ||
+      !roundedSquarePositionWithinBounds(
+        { lat: game.centerLat, lng: game.centerLng },
+        item,
+        activeRadius
+      )
+  )) {
+    await db
+      .update(gameItems)
+      .set({ status: "expired" })
+      .where(eq(gameItems.id, item.id));
   }
 }
-
-export async function reportLocation(session: GuestSession, location: { lat: number; lng: number; accuracy: number }) {
+export async function reportLocation(
+  session: GuestSession,
+  location: {
+    lat: number;
+    lng: number;
+    accuracy: number;
+  }
+) {
   const db = await requireDb();
   await tickGame(session.gameId);
   const player = await getSessionPlayer(session);
-  const game = (await db.select().from(games).where(eq(games.id, session.gameId)).limit(1))[0];
+  const game = (
+    await db.select().from(games).where(eq(games.id, session.gameId)).limit(1)
+  )[0];
   if (!game || game.status !== "running" || player.status !== "active") return;
   const now = new Date();
   const rules = parseRules(game.rulesJson);
   const elapsed = elapsedGameSeconds(game.startedAt, game.pausedSeconds, now);
-  const previous = player.lastLat !== null && player.lastLng !== null && player.lastLocationAt && now.getTime() - player.lastLocationAt.getTime() <= 20_000
-    ? { lat: player.lastLat, lng: player.lastLng }
-    : null;
+  const previous =
+    player.lastLat !== null &&
+    player.lastLng !== null &&
+    player.lastLocationAt &&
+    now.getTime() - player.lastLocationAt.getTime() <= 20000
+      ? { lat: player.lastLat, lng: player.lastLng }
+      : null;
   const current = { lat: location.lat, lng: location.lng };
-  // Infected may see their own GPS dot, but their active tools remain locked until the 45-second head start completes.
-  // Location is still stored during this time so a clean frozen ping can be taken later.
   const safelyInside = roundedSquarePositionWithinBounds(
     { lat: game.centerLat, lng: game.centerLng },
     current,
     effectiveStormRadius(game, now),
-    0,
+    0
   );
   let boundaryOutsideSince = player.boundaryOutsideSince;
   let boundaryExposed = player.boundaryExposed;
@@ -451,15 +1028,31 @@ export async function reportLocation(session: GuestSession, location: { lat: num
   if (!safelyInside) {
     const justLeftBoundary = !boundaryOutsideSince;
     boundaryOutsideSince ??= now;
-    if (justLeftBoundary) await addEvent(game.id, "boundary_left", player.id, player.id, "target", { name: player.displayName, graceSeconds: rules.boundaryGraceSeconds, forfeitSeconds: rules.boundaryForfeitSeconds });
-    const outsideSeconds = (now.getTime() - boundaryOutsideSince.getTime()) / 1000;
+    if (justLeftBoundary)
+      await addEvent(game.id, "boundary_left", player.id, player.id, "target", {
+        name: player.displayName,
+        graceSeconds: rules.boundaryGraceSeconds,
+        forfeitSeconds: rules.boundaryForfeitSeconds,
+      });
+    const outsideSeconds =
+      (now.getTime() - boundaryOutsideSince.getTime()) / 1000;
     boundaryExposed = outsideSeconds >= rules.boundaryGraceSeconds;
     if (outsideSeconds >= rules.boundaryForfeitSeconds) {
       status = "forfeited";
-      await addEvent(game.id, "boundary_forfeit", player.id, null, "public", { name: player.displayName });
+      await addEvent(game.id, "boundary_forfeit", player.id, null, "public", {
+        name: player.displayName,
+      });
     }
   } else {
-    if (boundaryOutsideSince) await addEvent(game.id, "boundary_returned", player.id, player.id, "target", { name: player.displayName });
+    if (boundaryOutsideSince)
+      await addEvent(
+        game.id,
+        "boundary_returned",
+        player.id,
+        player.id,
+        "target",
+        { name: player.displayName }
+      );
     boundaryOutsideSince = null;
     boundaryExposed = false;
   }
@@ -468,178 +1061,579 @@ export async function reportLocation(session: GuestSession, location: { lat: num
   let campAnchorLat = player.campAnchorLat;
   let campAnchorLng = player.campAnchorLng;
   let campAnchorAt = player.campAnchorAt;
-  if (player.role === "zombie" && previous && elapsedGameSeconds(game.startedAt, game.pausedSeconds, now) >= rules.headStartSeconds) {
+  if (
+    player.role === "zombie" &&
+    previous &&
+    elapsedGameSeconds(game.startedAt, game.pausedSeconds, now) >=
+      rules.headStartSeconds
+  ) {
     const moved = metersBetween(previous, current);
     if (moved > 1 && moved < 120) {
-      await db.insert(gameTrails).values({ id: id(), gameId: game.id, playerId: player.id, fromLat: previous.lat, fromLng: previous.lng, toLat: current.lat, toLng: current.lng, expiresAt: new Date(now.getTime() + rules.trailLifetimeSeconds * 1000) });
+      await db.insert(gameTrails).values({
+        id: id(),
+        gameId: game.id,
+        playerId: player.id,
+        fromLat: previous.lat,
+        fromLng: previous.lng,
+        toLat: current.lat,
+        toLng: current.lng,
+        expiresAt: new Date(now.getTime() + rules.trailLifetimeSeconds * 1000),
+      });
     }
   }
   if (player.role === "survivor") {
-    const trails = await db.select().from(gameTrails).where(and(eq(gameTrails.gameId, game.id), gt(gameTrails.expiresAt, now)));
-    if (trails.some(trail => distanceToSegmentMeters(current, { lat: trail.fromLat, lng: trail.fromLng }, { lat: trail.toLat, lng: trail.toLng }) <= rules.trailWidthMeters + Math.max(0, location.accuracy || 0))) {
-      trailExposureUntil = new Date(now.getTime() + rules.trailExitExposureSeconds * 1000);
+    const trails = await db
+      .select()
+      .from(gameTrails)
+      .where(
+        and(eq(gameTrails.gameId, game.id), gt(gameTrails.expiresAt, now))
+      );
+    if (
+      trails.some(
+        trail =>
+          distanceToSegmentMeters(
+            current,
+            { lat: trail.fromLat, lng: trail.fromLng },
+            { lat: trail.toLat, lng: trail.toLng }
+          ) <=
+          rules.trailWidthMeters + Math.max(0, location.accuracy || 0)
+      )
+    ) {
+      trailExposureUntil = new Date(
+        now.getTime() + rules.trailExitExposureSeconds * 1000
+      );
     }
-    const anchor = campAnchorLat !== null && campAnchorLng !== null ? { lat: campAnchorLat, lng: campAnchorLng } : null;
+    const anchor =
+      campAnchorLat !== null && campAnchorLng !== null
+        ? { lat: campAnchorLat, lng: campAnchorLng }
+        : null;
     if (!anchor || !campAnchorAt || metersBetween(anchor, current) > 15) {
       campAnchorLat = current.lat;
       campAnchorLng = current.lng;
       campAnchorAt = now;
-    } else if (shouldExposeCamper({ anchor, current, anchoredAt: campAnchorAt, now })) {
-      videoExposureUntil = new Date(now.getTime() + 20_000);
+    } else if (
+      shouldExposeCamper({ anchor, current, anchoredAt: campAnchorAt, now })
+    ) {
+      videoExposureUntil = new Date(now.getTime() + 20000);
       campAnchorLat = current.lat;
       campAnchorLng = current.lng;
       campAnchorAt = now;
-      await addEvent(game.id, "camper_exposed", player.id, null, "zombies", { name: player.displayName, seconds: 20, lat: current.lat, lng: current.lng });
-      await addEvent(game.id, "camper_warning", null, player.id, "target", { seconds: 20, radiusMeters: 15 });
+      await addEvent(game.id, "camper_exposed", player.id, null, "zombies", {
+        name: player.displayName,
+        seconds: 20,
+        lat: current.lat,
+        lng: current.lng,
+      });
+      await addEvent(game.id, "camper_warning", null, player.id, "target", {
+        seconds: 20,
+        radiusMeters: 15,
+      });
     }
   }
   let extractionStartedAt = player.extractionStartedAt;
-  if (player.role === "survivor" && status === "active" && elapsedGameSeconds(game.startedAt, game.pausedSeconds, now) >= rules.extractionOpensAtSeconds) {
-    const extraction = await db.select().from(gamePoints).where(and(eq(gamePoints.gameId, game.id), eq(gamePoints.type, "extraction"), eq(gamePoints.isActive, true)));
-    const insideExtraction = extraction.some(point => metersBetween(current, point) <= 20 + Math.max(0, location.accuracy || 0));
+  if (
+    player.role === "survivor" &&
+    status === "active" &&
+    elapsedGameSeconds(game.startedAt, game.pausedSeconds, now) >=
+      rules.extractionOpensAtSeconds
+  ) {
+    const extraction = await db
+      .select()
+      .from(gamePoints)
+      .where(
+        and(
+          eq(gamePoints.gameId, game.id),
+          eq(gamePoints.type, "extraction"),
+          eq(gamePoints.isActive, true)
+        )
+      );
+    const insideExtraction = extraction.some(
+      point =>
+        metersBetween(current, point) <=
+        20 + Math.max(0, location.accuracy || 0)
+    );
     if (insideExtraction) {
       extractionStartedAt ??= now;
-      const pending = await db.select().from(gameCaptureClaims).where(and(eq(gameCaptureClaims.gameId, game.id), eq(gameCaptureClaims.targetPlayerId, player.id), eq(gameCaptureClaims.status, "pending")));
-      if (!pending.length && now.getTime() - extractionStartedAt.getTime() >= rules.extractionHoldSeconds * 1000) {
-        await db.update(gamePlayers).set({ status: "escaped" }).where(eq(gamePlayers.id, player.id));
-        await db.update(games).set({ status: "finished", winner: "survivors", finishedAt: now }).where(eq(games.id, game.id));
-        await addEvent(game.id, "extraction_complete", player.id, null, "public", { name: player.displayName });
+      const pending = await db
+        .select()
+        .from(gameCaptureClaims)
+        .where(
+          and(
+            eq(gameCaptureClaims.gameId, game.id),
+            eq(gameCaptureClaims.targetPlayerId, player.id),
+            eq(gameCaptureClaims.status, "pending")
+          )
+        );
+      if (
+        !pending.length &&
+        now.getTime() - extractionStartedAt.getTime() >=
+          rules.extractionHoldSeconds * 1000
+      ) {
+        await db
+          .update(gamePlayers)
+          .set({ status: "escaped" })
+          .where(eq(gamePlayers.id, player.id));
+        await db
+          .update(games)
+          .set({ status: "finished", winner: "survivors", finishedAt: now })
+          .where(eq(games.id, game.id));
+        await addEvent(
+          game.id,
+          "extraction_complete",
+          player.id,
+          null,
+          "public",
+          { name: player.displayName }
+        );
       }
     } else {
       extractionStartedAt = null;
     }
   }
-  await db.update(gamePlayers).set({ lastLat: current.lat, lastLng: current.lng, lastLocationAt: now, boundaryOutsideSince, boundaryExposed, status, trailExposureUntil, videoExposureUntil, campAnchorLat, campAnchorLng, campAnchorAt, extractionStartedAt }).where(eq(gamePlayers.id, player.id));
+  await db
+    .update(gamePlayers)
+    .set({
+      lastLat: current.lat,
+      lastLng: current.lng,
+      lastLocationAt: now,
+      boundaryOutsideSince,
+      boundaryExposed,
+      status,
+      trailExposureUntil,
+      videoExposureUntil,
+      campAnchorLat,
+      campAnchorLng,
+      campAnchorAt,
+      extractionStartedAt,
+    })
+    .where(eq(gamePlayers.id, player.id));
 }
-
-/** Validates real-time media actions before bytes are stored. */
-export async function validateGameMediaAction(input: { gameId: string; playerToken: string; targetPlayerId?: string | null; kind: "photo" | "video" }) {
+export async function validateGameMediaAction(input: {
+  gameId: string;
+  playerToken: string;
+  targetPlayerId?: string | null;
+  kind: "photo" | "video";
+}) {
   const db = await requireDb();
-  const player = await getSessionPlayer({ gameId: input.gameId, playerToken: input.playerToken });
-  const game = (await db.select().from(games).where(eq(games.id, input.gameId)).limit(1))[0];
-  if (!game || game.status !== "running") throw new Error("Media can only be submitted during an active match.");
+  const player = await getSessionPlayer({
+    gameId: input.gameId,
+    playerToken: input.playerToken,
+  });
+  const game = (
+    await db.select().from(games).where(eq(games.id, input.gameId)).limit(1)
+  )[0];
+  if (!game || game.status !== "running")
+    throw new Error("Media can only be submitted during an active match.");
   const now = new Date();
   const rules = parseRules(game.rulesJson);
   const elapsed = elapsedGameSeconds(game.startedAt, game.pausedSeconds, now);
   if (input.kind === "photo") {
-    if (player.role !== "zombie" || player.status !== "active") throw new Error("Only active infected players can submit a capture photo.");
-    if (headStartRemainingSeconds(elapsed, rules) > 0) throw new Error(`Do not move yet — hunting unlocks in ${headStartRemainingSeconds(elapsed, rules)} seconds.`);
-    if (!input.targetPlayerId) throw new Error("Choose the survivor shown in the capture before sending the photo.");
-    const target = (await db.select().from(gamePlayers).where(and(eq(gamePlayers.id, input.targetPlayerId), eq(gamePlayers.gameId, input.gameId))).limit(1))[0];
-    if (!target || target.role !== "survivor" || target.status !== "active") throw new Error("That survivor is no longer eligible for a capture claim.");
+    if (player.role !== "zombie" || player.status !== "active")
+      throw new Error(
+        "Only active infected players can submit a capture photo."
+      );
+    if (headStartRemainingSeconds(elapsed, rules) > 0)
+      throw new Error(
+        `Do not move yet — hunting unlocks in ${headStartRemainingSeconds(elapsed, rules)} seconds.`
+      );
+    if (!input.targetPlayerId)
+      throw new Error(
+        "Choose the survivor shown in the capture before sending the photo."
+      );
+    const target = (
+      await db
+        .select()
+        .from(gamePlayers)
+        .where(
+          and(
+            eq(gamePlayers.id, input.targetPlayerId),
+            eq(gamePlayers.gameId, input.gameId)
+          )
+        )
+        .limit(1)
+    )[0];
+    if (!target || target.role !== "survivor" || target.status !== "active")
+      throw new Error(
+        "That survivor is no longer eligible for a capture claim."
+      );
   } else {
-    if (player.role !== "survivor" || player.status !== "active") throw new Error("Only active survivors can submit a field video.");
-    if (!player.videoDueAt || !player.videoUploadDeadlineAt || player.videoUploadDeadlineAt <= now) throw new Error("There is no active field-video request. Wait for the next video check.");
+    if (player.role !== "survivor" || player.status !== "active")
+      throw new Error("Only active survivors can submit a field video.");
+    if (
+      !player.videoDueAt ||
+      !player.videoUploadDeadlineAt ||
+      player.videoUploadDeadlineAt <= now
+    )
+      throw new Error(
+        "There is no active field-video request. Wait for the next video check."
+      );
   }
   return player;
 }
-
 export async function collectItem(session: GuestSession, itemId: string) {
   const db = await requireDb();
   const player = await getSessionPlayer(session);
-  if (player.inventory) throw new Error("Use your carried item before collecting another.");
-  const item = (await db.select().from(gameItems).where(and(eq(gameItems.id, itemId), eq(gameItems.gameId, session.gameId))).limit(1))[0];
-  if (!item || item.status !== "active" || item.expiresAt < new Date()) throw new Error("That item is no longer available.");
-  if (item.faction !== player.role || player.lastLat === null || player.lastLng === null || metersBetween({ lat: player.lastLat, lng: player.lastLng }, item) > 30) throw new Error("Move closer to collect this item.");
-  await db.update(gameItems).set({ status: "collected", collectedBy: player.id }).where(eq(gameItems.id, item.id));
-  await db.update(gamePlayers).set({ inventory: item.type }).where(eq(gamePlayers.id, player.id));
-  await addEvent(session.gameId, "item_collected", player.id, null, player.role === "zombie" ? "zombies" : "survivors", { type: item.type });
+  if (player.inventory)
+    throw new Error("Use your carried item before collecting another.");
+  const item = (
+    await db
+      .select()
+      .from(gameItems)
+      .where(
+        and(eq(gameItems.id, itemId), eq(gameItems.gameId, session.gameId))
+      )
+      .limit(1)
+  )[0];
+  if (!item || item.status !== "active" || item.expiresAt < new Date())
+    throw new Error("That item is no longer available.");
+  if (
+    item.faction !== player.role ||
+    player.lastLat === null ||
+    player.lastLng === null ||
+    metersBetween({ lat: player.lastLat, lng: player.lastLng }, item) > 30
+  )
+    throw new Error("Move closer to collect this item.");
+  await db
+    .update(gameItems)
+    .set({ status: "collected", collectedBy: player.id })
+    .where(eq(gameItems.id, item.id));
+  await db
+    .update(gamePlayers)
+    .set({ inventory: item.type })
+    .where(eq(gamePlayers.id, player.id));
+  await addEvent(
+    session.gameId,
+    "item_collected",
+    player.id,
+    null,
+    player.role === "zombie" ? "zombies" : "survivors",
+    { type: item.type }
+  );
 }
-
 export async function useItem(session: GuestSession) {
   const db = await requireDb();
   const player = await getSessionPlayer(session);
   if (!player.inventory) throw new Error("No item is carried.");
   const inventory = player.inventory;
-  await db.update(gamePlayers).set({ inventory: null, videoSkipArmed: inventory === "video_skip" }).where(eq(gamePlayers.id, player.id));
+  await db
+    .update(gamePlayers)
+    .set({ inventory: null, videoSkipArmed: inventory === "video_skip" })
+    .where(eq(gamePlayers.id, player.id));
   if (inventory === "video_skip") {
-    await addEvent(session.gameId, "video_skip_armed", player.id, null, "target", { type: inventory });
+    await addEvent(
+      session.gameId,
+      "video_skip_armed",
+      player.id,
+      null,
+      "target",
+      { type: inventory }
+    );
   } else {
-    const targets = await db.select().from(gamePlayers).where(eq(gamePlayers.gameId, session.gameId));
-    const snapshots = targets.filter(target => inventory === "hunt_scan" ? target.role === "survivor" : target.role === "zombie").filter(target => target.lastLat !== null && target.lastLng !== null).map(target => ({ id: target.id, name: target.displayName, lat: target.lastLat, lng: target.lastLng }));
-    await addEvent(session.gameId, "scan_used", player.id, null, player.role === "zombie" ? "zombies" : "survivors", { type: inventory, snapshots });
+    const targets = await db
+      .select()
+      .from(gamePlayers)
+      .where(eq(gamePlayers.gameId, session.gameId));
+    const snapshots = targets
+      .filter(target =>
+        inventory === "hunt_scan"
+          ? target.role === "survivor"
+          : target.role === "zombie"
+      )
+      .filter(target => target.lastLat !== null && target.lastLng !== null)
+      .map(target => ({
+        id: target.id,
+        name: target.displayName,
+        lat: target.lastLat,
+        lng: target.lastLng,
+      }));
+    await addEvent(
+      session.gameId,
+      "scan_used",
+      player.id,
+      null,
+      player.role === "zombie" ? "zombies" : "survivors",
+      { type: inventory, snapshots }
+    );
   }
 }
-
-export async function resolveCapture(session: GuestSession, claimId: string, resolution: "confirm" | "dispute" | "host_capture" | "host_dismiss") {
+export async function resolveCapture(
+  session: GuestSession,
+  claimId: string,
+  resolution: "confirm" | "dispute" | "host_capture" | "host_dismiss"
+) {
   const db = await requireDb();
   const player = await getSessionPlayer(session);
-  const claim = (await db.select().from(gameCaptureClaims).where(and(eq(gameCaptureClaims.id, claimId), eq(gameCaptureClaims.gameId, session.gameId))).limit(1))[0];
+  const claim = (
+    await db
+      .select()
+      .from(gameCaptureClaims)
+      .where(
+        and(
+          eq(gameCaptureClaims.id, claimId),
+          eq(gameCaptureClaims.gameId, session.gameId)
+        )
+      )
+      .limit(1)
+  )[0];
   if (!claim) throw new Error("Capture claim not found.");
-  // Double taps and slow mobile refreshes may replay an already-applied confirmation.
-  // Treat the command as successful rather than surfacing a false failure to the player.
-  if (claim.status === "resolved") return { resolved: true, replayed: true, resolution: claim.resolution };
+  if (claim.status === "resolved")
+    return { resolved: true, replayed: true, resolution: claim.resolution };
   const isTarget = claim.targetPlayerId === player.id;
-  if ((resolution === "confirm" || resolution === "dispute") && !isTarget) throw new Error("Only the targeted player can respond to this claim.");
-  if ((resolution === "host_capture" || resolution === "host_dismiss") && !player.isHost) throw new Error("Only the host can resolve a disputed claim.");
+  if ((resolution === "confirm" || resolution === "dispute") && !isTarget)
+    throw new Error("Only the targeted player can respond to this claim.");
+  if (
+    (resolution === "host_capture" || resolution === "host_dismiss") &&
+    !player.isHost
+  )
+    throw new Error("Only the host can resolve a disputed claim.");
   const capture = resolution === "confirm" || resolution === "host_capture";
   const now = new Date();
   if (resolution === "dispute") {
-    await db.update(gameCaptureClaims).set({ status: "disputed" }).where(eq(gameCaptureClaims.id, claim.id));
-    await addEvent(session.gameId, "capture_disputed", player.id, claim.zombiePlayerId, "host", { claimId });
+    await db
+      .update(gameCaptureClaims)
+      .set({ status: "disputed" })
+      .where(eq(gameCaptureClaims.id, claim.id));
+    await addEvent(
+      session.gameId,
+      "capture_disputed",
+      player.id,
+      claim.zombiePlayerId,
+      "host",
+      { claimId }
+    );
     return;
   }
-  await db.update(gameCaptureClaims).set({ status: "resolved", resolution: capture ? "capture" : "dismissed", resolvedAt: now }).where(eq(gameCaptureClaims.id, claim.id));
+  await db
+    .update(gameCaptureClaims)
+    .set({
+      status: "resolved",
+      resolution: capture ? "capture" : "dismissed",
+      resolvedAt: now,
+    })
+    .where(eq(gameCaptureClaims.id, claim.id));
   if (capture) {
-    const players = await db.select({ id: gamePlayers.id, role: gamePlayers.role, status: gamePlayers.status }).from(gamePlayers).where(eq(gamePlayers.gameId, session.gameId));
+    const players = await db
+      .select({
+        id: gamePlayers.id,
+        role: gamePlayers.role,
+        status: gamePlayers.status,
+      })
+      .from(gamePlayers)
+      .where(eq(gamePlayers.gameId, session.gameId));
     const finalCapture = isFinalSurvivorCapture(players, claim.targetPlayerId);
-    await db.update(gamePlayers).set({
-      role: finalCapture ? "zombie" : "survivor",
-      status: finalCapture ? "active" : "turning",
-      turnEndsAt: finalCapture ? null : new Date(now.getTime() + DEFAULT_RULES.captureTurnSeconds * 1000),
-      inventory: null,
-      videoSkipArmed: false,
-    }).where(eq(gamePlayers.id, claim.targetPlayerId));
-    await db.update(games).set({ lastCaptureAt: now }).where(eq(games.id, session.gameId));
-    await addEvent(session.gameId, "capture_confirmed", claim.zombiePlayerId, claim.targetPlayerId, "public", { turnSeconds: DEFAULT_RULES.captureTurnSeconds });
+    await db
+      .update(gamePlayers)
+      .set({
+        role: finalCapture ? "zombie" : "survivor",
+        status: finalCapture ? "active" : "turning",
+        turnEndsAt: finalCapture
+          ? null
+          : new Date(now.getTime() + DEFAULT_RULES.captureTurnSeconds * 1000),
+        inventory: null,
+        videoSkipArmed: false,
+      })
+      .where(eq(gamePlayers.id, claim.targetPlayerId));
+    await db
+      .update(games)
+      .set({ lastCaptureAt: now })
+      .where(eq(games.id, session.gameId));
+    await addEvent(
+      session.gameId,
+      "capture_confirmed",
+      claim.zombiePlayerId,
+      claim.targetPlayerId,
+      "public",
+      { turnSeconds: DEFAULT_RULES.captureTurnSeconds }
+    );
     if (finalCapture) {
-      await addEvent(session.gameId, "player_turned", claim.targetPlayerId, null, "public", {});
-      await db.update(games).set({ status: "finished", winner: "zombies", finishedAt: now, pausedAt: null }).where(eq(games.id, session.gameId));
-      await addEvent(session.gameId, "match_finished", null, null, "public", { winner: "zombies", reason: "final_capture" });
+      await addEvent(
+        session.gameId,
+        "player_turned",
+        claim.targetPlayerId,
+        null,
+        "public",
+        {}
+      );
+      await db
+        .update(games)
+        .set({
+          status: "finished",
+          winner: "zombies",
+          finishedAt: now,
+          pausedAt: null,
+        })
+        .where(eq(games.id, session.gameId));
+      await addEvent(session.gameId, "match_finished", null, null, "public", {
+        winner: "zombies",
+        reason: "final_capture",
+      });
     }
   } else {
-    await addEvent(session.gameId, "capture_dismissed", player.id, claim.zombiePlayerId, "public", {});
+    await addEvent(
+      session.gameId,
+      "capture_dismissed",
+      player.id,
+      claim.zombiePlayerId,
+      "public",
+      {}
+    );
   }
-  return { resolved: true, replayed: false, resolution: capture ? "capture" : "dismissed" };
+  return {
+    resolved: true,
+    replayed: false,
+    resolution: capture ? "capture" : "dismissed",
+  };
 }
-
 export async function gameSnapshot(session: GuestSession) {
   await tickGame(session.gameId);
   const db = await requireDb();
   const viewer = await getSessionPlayer(session);
-  const game = (await db.select().from(games).where(eq(games.id, session.gameId)).limit(1))[0];
+  const game = (
+    await db.select().from(games).where(eq(games.id, session.gameId)).limit(1)
+  )[0];
   if (!game) throw new Error("Game not found.");
-  const [allPlayers, points, trails, items, events, media, claims] = await Promise.all([
-    db.select().from(gamePlayers).where(eq(gamePlayers.gameId, game.id)),
-    db.select().from(gamePoints).where(eq(gamePoints.gameId, game.id)),
-    db.select().from(gameTrails).where(and(eq(gameTrails.gameId, game.id), gt(gameTrails.expiresAt, new Date()))),
-    db.select().from(gameItems).where(and(eq(gameItems.gameId, game.id), eq(gameItems.status, "active"))),
-    db.select().from(gameEvents).where(eq(gameEvents.gameId, game.id)).orderBy(desc(gameEvents.createdAt)).limit(40),
-    db.select().from(gameMedia).where(eq(gameMedia.gameId, game.id)).orderBy(desc(gameMedia.createdAt)).limit(20),
-    db.select().from(gameCaptureClaims).where(eq(gameCaptureClaims.gameId, game.id)).orderBy(desc(gameCaptureClaims.createdAt)),
-  ]);
+  const [allPlayers, points, trails, items, events, media, claims] =
+    await Promise.all([
+      db.select().from(gamePlayers).where(eq(gamePlayers.gameId, game.id)),
+      db.select().from(gamePoints).where(eq(gamePoints.gameId, game.id)),
+      db
+        .select()
+        .from(gameTrails)
+        .where(
+          and(
+            eq(gameTrails.gameId, game.id),
+            gt(gameTrails.expiresAt, new Date())
+          )
+        ),
+      db
+        .select()
+        .from(gameItems)
+        .where(
+          and(eq(gameItems.gameId, game.id), eq(gameItems.status, "active"))
+        ),
+      db
+        .select()
+        .from(gameEvents)
+        .where(eq(gameEvents.gameId, game.id))
+        .orderBy(desc(gameEvents.createdAt))
+        .limit(40),
+      db
+        .select()
+        .from(gameMedia)
+        .where(eq(gameMedia.gameId, game.id))
+        .orderBy(desc(gameMedia.createdAt))
+        .limit(20),
+      db
+        .select()
+        .from(gameCaptureClaims)
+        .where(eq(gameCaptureClaims.gameId, game.id))
+        .orderBy(desc(gameCaptureClaims.createdAt)),
+    ]);
   const now = new Date();
   const isHost = viewer.isHost;
-  const canSeeLiveSurvivor = (target: typeof allPlayers[number]) => target.id === viewer.id || (viewer.role === "zombie" && ((!!target.trailExposureUntil && target.trailExposureUntil > now) || (!!target.videoExposureUntil && target.videoExposureUntil > now) || target.boundaryExposed));
+  const canSeeLiveSurvivor = (target: (typeof allPlayers)[number]) =>
+    target.id === viewer.id ||
+    (viewer.role === "zombie" &&
+      ((!!target.trailExposureUntil && target.trailExposureUntil > now) ||
+        (!!target.videoExposureUntil && target.videoExposureUntil > now) ||
+        target.boundaryExposed));
   const visiblePlayers = allPlayers.map(target => {
-    const base = { id: target.id, name: target.displayName, profileImageUrl: target.profileImageKey ? `/manus-storage/${target.profileImageKey}` : null, role: target.role, status: target.status, isHost: target.isHost, isReady: target.isReady, exposureUntil: target.videoExposureUntil && target.videoExposureUntil > now ? target.videoExposureUntil : target.trailExposureUntil, boundaryExposed: target.boundaryExposed, lastLocationAt: target.lastLocationAt, pingedAt: target.lastPingAt };
-    if (canSeeLiveSurvivor(target) || (viewer.role === "zombie" && target.role === "zombie")) return { ...base, lat: target.lastLat, lng: target.lastLng, positionKind: "live" as const };
-    if (target.lastPingLat !== null && target.lastPingLng !== null && canViewSurvivorPing({ viewerId: viewer.id, viewerRole: viewer.role, targetId: target.id, targetRole: target.role, pingedAt: target.lastPingAt, expiresAt: target.lastPingExpiresAt, now })) return { ...base, lat: target.lastPingLat, lng: target.lastPingLng, positionKind: "snapshot" as const };
+    const base = {
+      id: target.id,
+      name: target.displayName,
+      profileImageUrl: target.profileImageKey
+        ? `/manus-storage/${target.profileImageKey}`
+        : null,
+      role: target.role,
+      status: target.status,
+      isHost: target.isHost,
+      isReady: target.isReady,
+      exposureUntil:
+        target.videoExposureUntil && target.videoExposureUntil > now
+          ? target.videoExposureUntil
+          : target.trailExposureUntil,
+      boundaryExposed: target.boundaryExposed,
+      lastLocationAt: target.lastLocationAt,
+      pingedAt: target.lastPingAt,
+    };
+    if (
+      canSeeLiveSurvivor(target) ||
+      (viewer.role === "zombie" && target.role === "zombie")
+    )
+      return {
+        ...base,
+        lat: target.lastLat,
+        lng: target.lastLng,
+        positionKind: "live" as const,
+      };
+    if (
+      target.lastPingLat !== null &&
+      target.lastPingLng !== null &&
+      canViewSurvivorPing({
+        viewerId: viewer.id,
+        viewerRole: viewer.role,
+        targetId: target.id,
+        targetRole: target.role,
+        pingedAt: target.lastPingAt,
+        expiresAt: target.lastPingExpiresAt,
+        now,
+      })
+    )
+      return {
+        ...base,
+        lat: target.lastPingLat,
+        lng: target.lastPingLng,
+        positionKind: "snapshot" as const,
+      };
     return { ...base, lat: null, lng: null, positionKind: "hidden" as const };
   });
-  const visibleEvents = events.filter(event => event.visibility === "public" || (event.visibility === "host" && isHost) || (event.visibility === "target" && event.targetPlayerId === viewer.id) || (event.visibility === "zombies" && viewer.role === "zombie") || (event.visibility === "survivors" && viewer.role === "survivor"));
-  const authorizedMedia = media.filter(entry => entry.playerId === viewer.id || entry.targetPlayerId === viewer.id || (entry.visibility === "zombies" && viewer.role === "zombie") || (entry.visibility === "survivors" && viewer.role === "survivor"));
-  // Infected Intel is intentionally short-lived: retain the newest two survivor videos while preserving any capture evidence the viewer owns.
-  const visibleMedia = (viewer.role === "zombie"
-    ? authorizedMedia.filter(entry => entry.kind !== "video").concat(authorizedMedia.filter(entry => entry.kind === "video").slice(0, 2))
-    : authorizedMedia
+  const visibleEvents = events.filter(
+    event =>
+      event.visibility === "public" ||
+      (event.visibility === "host" && isHost) ||
+      (event.visibility === "target" && event.targetPlayerId === viewer.id) ||
+      (event.visibility === "zombies" && viewer.role === "zombie") ||
+      (event.visibility === "survivors" && viewer.role === "survivor")
+  );
+  const authorizedMedia = media.filter(
+    entry =>
+      entry.playerId === viewer.id ||
+      entry.targetPlayerId === viewer.id ||
+      (entry.visibility === "zombies" && viewer.role === "zombie") ||
+      (entry.visibility === "survivors" && viewer.role === "survivor")
+  );
+  const visibleMedia = (
+    viewer.role === "zombie"
+      ? authorizedMedia
+          .filter(entry => entry.kind !== "video")
+          .concat(
+            authorizedMedia.filter(entry => entry.kind === "video").slice(0, 2)
+          )
+      : authorizedMedia
   ).map(entry => ({ ...entry, url: `/manus-storage/${entry.storageKey}` }));
-  const visibleClaims = claims.filter(claim => claim.targetPlayerId === viewer.id || claim.zombiePlayerId === viewer.id);
-  const visibleItems = items.filter(item => item.expiresAt > now && item.faction === viewer.role);
+  const visibleClaims = claims.filter(
+    claim =>
+      claim.targetPlayerId === viewer.id || claim.zombiePlayerId === viewer.id
+  );
+  const visibleItems = items.filter(
+    item => item.expiresAt > now && item.faction === viewer.role
+  );
   const rules = parseRules(game.rulesJson);
-  const elapsedSeconds = elapsedGameSeconds(game.startedAt, game.pausedSeconds, now);
-  const headStartRemaining = game.status === "running" ? headStartRemainingSeconds(elapsedSeconds, rules) : 0;
-  const staleLocationSeconds = viewer.lastLocationAt ? Math.max(0, Math.floor((now.getTime() - viewer.lastLocationAt.getTime()) / 1000)) : null;
+  const elapsedSeconds = elapsedGameSeconds(
+    game.startedAt,
+    game.pausedSeconds,
+    now
+  );
+  const headStartRemaining =
+    game.status === "running"
+      ? headStartRemainingSeconds(elapsedSeconds, rules)
+      : 0;
+  const staleLocationSeconds = viewer.lastLocationAt
+    ? Math.max(
+        0,
+        Math.floor((now.getTime() - viewer.lastLocationAt.getTime()) / 1000)
+      )
+    : null;
   const recap = buildMatchRecap(allPlayers, claims);
   const visiblePoints = ["running", "paused", "finished"].includes(game.status)
     ? points.filter(point => point.type === "extraction" && point.isActive)
@@ -647,41 +1641,120 @@ export async function gameSnapshot(session: GuestSession) {
   return {
     game: {
       ...game,
-      // The innermost boundary is a host-only setup aid; it is never shared to field devices.
-      minimumRadius: viewer.isHost && ["setup", "lobby"].includes(game.status) ? game.minimumRadius : null,
+      minimumRadius:
+        viewer.isHost && ["setup", "lobby"].includes(game.status)
+          ? game.minimumRadius
+          : null,
       currentRadius: effectiveStormRadius(game, now),
       rules,
       elapsedSeconds,
       headStartRemainingSeconds: headStartRemaining,
-      huntTransitionSeconds: headStartRemaining === 0 && elapsedSeconds >= rules.headStartSeconds && elapsedSeconds < rules.headStartSeconds + 3
-        ? rules.headStartSeconds + 3 - elapsedSeconds
-        : 0,
+      huntTransitionSeconds:
+        headStartRemaining === 0 &&
+        elapsedSeconds >= rules.headStartSeconds &&
+        elapsedSeconds < rules.headStartSeconds + 3
+          ? rules.headStartSeconds + 3 - elapsedSeconds
+          : 0,
     },
-    viewer: { id: viewer.id, name: viewer.displayName, role: viewer.role, status: viewer.status, isHost: viewer.isHost, inventory: viewer.inventory, videoSkipArmed: viewer.videoSkipArmed, videoDueAt: viewer.videoDueAt, videoUploadDeadlineAt: viewer.videoUploadDeadlineAt, videoExposureUntil: viewer.videoExposureUntil, staleLocationSeconds, extractionStartedAt: viewer.extractionStartedAt, boundaryOutsideSince: viewer.boundaryOutsideSince },
+    viewer: {
+      id: viewer.id,
+      name: viewer.displayName,
+      role: viewer.role,
+      status: viewer.status,
+      isHost: viewer.isHost,
+      inventory: viewer.inventory,
+      videoSkipArmed: viewer.videoSkipArmed,
+      videoDueAt: viewer.videoDueAt,
+      videoUploadDeadlineAt: viewer.videoUploadDeadlineAt,
+      videoExposureUntil: viewer.videoExposureUntil,
+      staleLocationSeconds,
+      extractionStartedAt: viewer.extractionStartedAt,
+      boundaryOutsideSince: viewer.boundaryOutsideSince,
+    },
     players: visiblePlayers,
     points: visiblePoints,
     trails: viewer.role === "zombie" ? trails : [],
     items: visibleItems,
-    events: visibleEvents.map(event => ({ ...event, payload: parseEventPayload(event.payloadJson) })),
+    events: visibleEvents.map(event => ({
+      ...event,
+      payload: parseEventPayload(event.payloadJson),
+    })),
     media: visibleMedia,
     claims: visibleClaims,
     recap,
   };
 }
-
-export async function createMediaEntry(input: { gameId: string; playerId: string; targetPlayerId?: string | null; kind: "photo" | "video"; visibility: "host" | "target" | "zombies" | "survivors"; storageKey: string; mimeType: string; durationSeconds?: number | null }) {
+export async function createMediaEntry(input: {
+  gameId: string;
+  playerId: string;
+  targetPlayerId?: string | null;
+  kind: "photo" | "video";
+  visibility: "host" | "target" | "zombies" | "survivors";
+  storageKey: string;
+  mimeType: string;
+  durationSeconds?: number | null;
+}) {
   const db = await requireDb();
   const mediaId = id();
   await db.insert(gameMedia).values({ id: mediaId, ...input });
   if (input.kind === "photo" && input.targetPlayerId) {
-    const pending = await db.select().from(gameCaptureClaims).where(and(eq(gameCaptureClaims.gameId, input.gameId), eq(gameCaptureClaims.targetPlayerId, input.targetPlayerId), inArray(gameCaptureClaims.status, ["pending", "disputed"])));
-    if (pending.length) throw new Error("That player already has a pending capture claim.");
-    await db.insert(gameCaptureClaims).values({ id: id(), gameId: input.gameId, zombiePlayerId: input.playerId, targetPlayerId: input.targetPlayerId, mediaId, status: "pending" });
-    await addEvent(input.gameId, "capture_requested", input.playerId, input.targetPlayerId, "target", { mediaId });
+    const pending = await db
+      .select()
+      .from(gameCaptureClaims)
+      .where(
+        and(
+          eq(gameCaptureClaims.gameId, input.gameId),
+          eq(gameCaptureClaims.targetPlayerId, input.targetPlayerId),
+          inArray(gameCaptureClaims.status, ["pending", "disputed"])
+        )
+      );
+    if (pending.length)
+      throw new Error("That player already has a pending capture claim.");
+    await db.insert(gameCaptureClaims).values({
+      id: id(),
+      gameId: input.gameId,
+      zombiePlayerId: input.playerId,
+      targetPlayerId: input.targetPlayerId,
+      mediaId,
+      status: "pending",
+    });
+    await addEvent(
+      input.gameId,
+      "capture_requested",
+      input.playerId,
+      input.targetPlayerId,
+      "target",
+      { mediaId }
+    );
   } else {
-    await db.update(gamePlayers).set({ videoDueAt: null, videoUploadDeadlineAt: null }).where(eq(gamePlayers.id, input.playerId));
-    const player = (await db.select({ name: gamePlayers.displayName, lat: gamePlayers.lastLat, lng: gamePlayers.lastLng }).from(gamePlayers).where(eq(gamePlayers.id, input.playerId)).limit(1))[0];
-    await addEvent(input.gameId, "surroundings_video", input.playerId, null, "zombies", { mediaId, name: player?.name ?? "Survivor", lat: player?.lat ?? null, lng: player?.lng ?? null });
+    await db
+      .update(gamePlayers)
+      .set({ videoDueAt: null, videoUploadDeadlineAt: null })
+      .where(eq(gamePlayers.id, input.playerId));
+    const player = (
+      await db
+        .select({
+          name: gamePlayers.displayName,
+          lat: gamePlayers.lastLat,
+          lng: gamePlayers.lastLng,
+        })
+        .from(gamePlayers)
+        .where(eq(gamePlayers.id, input.playerId))
+        .limit(1)
+    )[0];
+    await addEvent(
+      input.gameId,
+      "surroundings_video",
+      input.playerId,
+      null,
+      "zombies",
+      {
+        mediaId,
+        name: player?.name ?? "Survivor",
+        lat: player?.lat ?? null,
+        lng: player?.lng ?? null,
+      }
+    );
   }
   return mediaId;
 }
