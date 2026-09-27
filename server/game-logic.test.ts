@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveRules, distanceToSegmentMeters, effectiveStormRadius, metersBetween, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds } from "./game-logic";
+import { buildMatchRecap, deriveRules, distanceToSegmentMeters, effectiveStormRadius, metersBetween, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds } from "./game-logic";
 
 describe("game rule utilities", () => {
   it("measures short outdoor distances", () => {
@@ -58,5 +58,20 @@ describe("game rule utilities", () => {
     expect(roundedSquarePositionWithinBounds(center, { lat: 0.0008, lng: 0.0008 }, 100)).toBe(true);
     expect(roundedSquarePositionWithinBounds(center, { lat: 0.0011, lng: 0 }, 100)).toBe(false);
     expect(roundedSquarePositionWithinBounds(center, { lat: 0.00088, lng: 0.00088 }, 100)).toBe(false);
+  });
+
+  it("builds a capture recap from resolved authoritative claims", () => {
+    const players = [
+      { id: "z1", displayName: "Raven", role: "zombie", status: "active" },
+      { id: "s1", displayName: "Nova", role: "zombie", status: "active" },
+      { id: "s2", displayName: "Kite", role: "survivor", status: "escaped" },
+      { id: "s3", displayName: "Echo", role: "survivor", status: "forfeited" },
+    ];
+    const recap = buildMatchRecap(players, [
+      { id: "c1", zombiePlayerId: "z1", targetPlayerId: "s1", status: "resolved", resolution: "capture", createdAt: new Date("2026-01-01T00:01:00Z"), resolvedAt: new Date("2026-01-01T00:02:00Z") },
+      { id: "c2", zombiePlayerId: "z1", targetPlayerId: "s2", status: "resolved", resolution: "dismissed", createdAt: new Date("2026-01-01T00:03:00Z"), resolvedAt: new Date("2026-01-01T00:04:00Z") },
+    ]);
+    expect(recap.totals).toMatchObject({ captures: 1, infected: 2, escaped: 1, forfeited: 1, survivorsRemaining: 0 });
+    expect(recap.captures[0]).toMatchObject({ zombieName: "Raven", survivorName: "Nova" });
   });
 });

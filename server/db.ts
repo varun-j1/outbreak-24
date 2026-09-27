@@ -12,7 +12,7 @@ import {
   InsertUser,
   users,
 } from "../drizzle/schema";
-import { DEFAULT_RULES, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, metersBetween, parseRules, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds } from "./game-logic";
+import { DEFAULT_RULES, buildMatchRecap, deriveRules, distanceToSegmentMeters, effectiveStormRadius, elapsedGameSeconds, metersBetween, parseRules, pingIntervalSeconds, roundedSquarePositionWithinBounds, scheduledPingIntervalSeconds } from "./game-logic";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -525,7 +525,7 @@ export async function gameSnapshot(session: GuestSession) {
   const isHost = viewer.isHost;
   const canSeeLiveSurvivor = (target: typeof allPlayers[number]) => target.id === viewer.id || (viewer.role === "zombie" && ((!!target.trailExposureUntil && target.trailExposureUntil > now) || target.boundaryExposed));
   const visiblePlayers = allPlayers.map(target => {
-    const base = { id: target.id, name: target.displayName, profileImageUrl: target.profileImageKey ? `/manus-storage/${target.profileImageKey}` : null, role: target.role, status: target.status, isHost: target.isHost, isReady: target.isReady, exposureUntil: target.videoExposureUntil && target.videoExposureUntil > now ? target.videoExposureUntil : target.trailExposureUntil, boundaryExposed: target.boundaryExposed, lastLocationAt: target.lastLocationAt };
+    const base = { id: target.id, name: target.displayName, profileImageUrl: target.profileImageKey ? `/manus-storage/${target.profileImageKey}` : null, role: target.role, status: target.status, isHost: target.isHost, isReady: target.isReady, exposureUntil: target.videoExposureUntil && target.videoExposureUntil > now ? target.videoExposureUntil : target.trailExposureUntil, boundaryExposed: target.boundaryExposed, lastLocationAt: target.lastLocationAt, pingedAt: target.lastPingAt };
     if (canSeeLiveSurvivor(target) || (viewer.role === "zombie" && target.role === "zombie")) return { ...base, lat: target.lastLat, lng: target.lastLng, positionKind: "live" as const };
     if (target.role === "survivor" && target.lastPingLat !== null && target.lastPingLng !== null && target.lastPingExpiresAt && target.lastPingExpiresAt > now) return { ...base, lat: target.lastPingLat, lng: target.lastPingLng, positionKind: "snapshot" as const };
     return { ...base, lat: null, lng: null, positionKind: "hidden" as const };
@@ -536,6 +536,7 @@ export async function gameSnapshot(session: GuestSession) {
   const visibleItems = items.filter(item => item.expiresAt > now && (item.faction === viewer.role || isHost));
   const rules = parseRules(game.rulesJson);
   const staleLocationSeconds = viewer.lastLocationAt ? Math.max(0, Math.floor((now.getTime() - viewer.lastLocationAt.getTime()) / 1000)) : null;
+  const recap = buildMatchRecap(allPlayers, claims);
   const visiblePoints = ["running", "paused", "finished"].includes(game.status)
     ? points.filter(point => point.type === "extraction" && point.isActive)
     : points;
@@ -549,6 +550,7 @@ export async function gameSnapshot(session: GuestSession) {
     events: visibleEvents.map(event => ({ ...event, payload: event.payloadJson ? JSON.parse(event.payloadJson) : {} })),
     media: visibleMedia,
     claims: visibleClaims,
+    recap,
   };
 }
 

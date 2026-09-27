@@ -4,7 +4,7 @@ import { Crosshair, Footprints, MapPinned, Navigation, Route as RouteIcon, X, Zo
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export type TacticalPoint = { id: string; lat: number; lng: number; label: string; type: "extraction" | "powerup_candidate"; isActive?: boolean };
-export type TacticalPlayer = { id: string; name: string; profileImageUrl?: string | null; role: "survivor" | "zombie" | "spectator"; status: string; lat: number | null; lng: number | null; positionKind: "live" | "snapshot" | "hidden"; isHost: boolean; boundaryExposed: boolean };
+export type TacticalPlayer = { id: string; name: string; profileImageUrl?: string | null; role: "survivor" | "zombie" | "spectator"; status: string; lat: number | null; lng: number | null; positionKind: "live" | "snapshot" | "hidden"; pingedAt?: string | Date | null; isHost: boolean; boundaryExposed: boolean };
 export type TacticalTrail = { id: string; fromLat: number; fromLng: number; toLat: number; toLng: number };
 export type TacticalItem = { id: string; type: string; faction: string; lat: number; lng: number };
 
@@ -24,7 +24,7 @@ type Props = {
   className?: string;
 };
 type MarkerRecord = { marker: Marker; signature: string };
-type RouteState = { targetId: string; coordinates: Array<[number, number]>; distanceMeters: number; durationSeconds: number; loading?: boolean; error?: string };
+type RouteState = { targetId: string; coordinates: Array<[number, number]>; distanceMeters: number; durationSeconds: number; sourcePingAt: number; loading?: boolean; error?: string };
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined;
 const DEFAULT_CENTER = { lat: -34.92051, lng: 138.60456 };
@@ -105,6 +105,12 @@ function formatRouteDuration(seconds: number) {
   return `${Math.max(1, Math.ceil(seconds / 60))} min walk`;
 }
 
+function pingTimestamp(player?: TacticalPlayer) {
+  if (!player?.pingedAt) return 0;
+  const value = new Date(player.pingedAt).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
 function haptic(pattern: number | number[] = 18) {
   if (typeof navigator !== "undefined" && "vibrate" in navigator) navigator.vibrate(pattern);
 }
@@ -134,6 +140,8 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
   const ownPosition = currentLocation ?? (selfPlayer?.lat !== null && selfPlayer?.lat !== undefined && selfPlayer.lng !== null && selfPlayer.lng !== undefined ? { lat: selfPlayer.lat, lng: selfPlayer.lng } : null);
   const directionTarget = snapshotPlayers[0];
   const routeTarget = snapshotPlayers.find(player => player.id === routeTargetId) ?? directionTarget;
+  const routeTargetPingAt = pingTimestamp(routeTarget);
+  const routeNeedsRefresh = Boolean(routeState && routeTarget && routeState.targetId === routeTarget.id && routeTargetPingAt > routeState.sourcePingAt);
   const directionBearing = ownPosition && directionTarget?.lat !== null && directionTarget?.lat !== undefined && directionTarget.lng !== null && directionTarget.lng !== undefined ? bearingDegrees(ownPosition, { lat: directionTarget.lat, lng: directionTarget.lng }) : null;
   const fallbackImage = useMemo(() => MAPBOX_TOKEN ? `https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/${center.lng},${center.lat},15/1280x800?access_token=${encodeURIComponent(MAPBOX_TOKEN)}` : "", [center.lat, center.lng]);
   useEffect(() => { clickRef.current = onMapClick; }, [onMapClick]);
@@ -273,23 +281,23 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
   const zoom = (delta: number) => { mapRef.current?.setZoom((mapRef.current.getZoom() ?? 15) + delta, { animate: true }); haptic(8); };
   const buildRoute = async () => {
     if (!routeTarget || !ownPosition || !MAPBOX_TOKEN) {
-      setRouteState({ targetId: routeTarget?.id ?? "", coordinates: [], distanceMeters: 0, durationSeconds: 0, error: "Location is needed before a route can be built." });
+      setRouteState({ targetId: routeTarget?.id ?? "", coordinates: [], distanceMeters: 0, durationSeconds: 0, sourcePingAt: routeTargetPingAt, error: "Location is needed before a route can be built." });
       return;
     }
-    setRouteState({ targetId: routeTarget.id, coordinates: [], distanceMeters: 0, durationSeconds: 0, loading: true });
+    setRouteState({ targetId: routeTarget.id, coordinates: [], distanceMeters: 0, durationSeconds: 0, sourcePingAt: routeTargetPingAt, loading: true });
     haptic([18, 22, 18]);
     try {
       const response = await fetch(`https://api.mapbox.com/directions/v5/mapbox/walking/${ownPosition.lng},${ownPosition.lat};${routeTarget.lng},${routeTarget.lat}?alternatives=false&geometries=geojson&overview=full&steps=false&access_token=${encodeURIComponent(MAPBOX_TOKEN)}`);
       const result = await response.json();
       const route = result?.routes?.[0];
       if (!response.ok || !route?.geometry?.coordinates?.length) throw new Error(result?.message ?? "Mapbox could not build a walking route.");
-      const next = { targetId: routeTarget.id, coordinates: route.geometry.coordinates as Array<[number, number]>, distanceMeters: Number(route.distance ?? 0), durationSeconds: Number(route.duration ?? 0) };
+      const next = { targetId: routeTarget.id, coordinates: route.geometry.coordinates as Array<[number, number]>, distanceMeters: Number(route.distance ?? 0), durationSeconds: Number(route.duration ?? 0), sourcePingAt: routeTargetPingAt };
       setRouteState(next);
       const map = mapRef.current;
       if (map) map.fitBounds(L.latLngBounds(next.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])), { padding: [52, 52], maxZoom: 17, animate: true });
       haptic([25, 30, 25]);
     } catch (error) {
-      setRouteState({ targetId: routeTarget.id, coordinates: [], distanceMeters: 0, durationSeconds: 0, error: error instanceof Error ? error.message : "Could not build a walking route." });
+      setRouteState({ targetId: routeTarget.id, coordinates: [], distanceMeters: 0, durationSeconds: 0, sourcePingAt: routeTargetPingAt, error: error instanceof Error ? error.message : "Could not build a walking route." });
       haptic([70, 35, 70]);
     }
   };
@@ -300,7 +308,7 @@ export default function TacticalMap({ center, radius, minimumRadius, points, pla
     <div ref={containerRef} className="absolute inset-0 z-[1]" aria-label="Interactive two-dimensional field map" />
     <div className="pointer-events-none absolute inset-x-4 top-4 z-10 flex items-start justify-between gap-3"><div className="rounded-xl border border-teal-300/30 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.12em] text-teal-100 shadow-lg"><span className="block text-[9px] text-slate-400">FIELD MAP</span>2D STREET DETAIL</div>{mapError && <div className="max-w-xs rounded-xl border border-amber-300/50 bg-[#071116]/95 px-3 py-2 text-xs font-bold text-amber-100">{mapError}</div>}</div>
     {directionBearing !== null && <div className="pointer-events-none absolute right-4 top-16 z-10 flex items-center gap-2 rounded-xl border border-[#ff455c]/35 bg-[#071116]/92 px-2.5 py-2 text-[10px] font-black tracking-[.08em] text-[#ffb0ba]"><Navigation size={20} className="text-[#ff455c]" style={{ transform: `rotate(${directionBearing}deg)` }} fill="currentColor" /><span>LAST PING<br />{directionTarget.name.toUpperCase()}</span></div>}
-    {routeTarget && ownPosition && <div className="absolute bottom-4 left-4 z-20 max-w-[min(19rem,calc(100%-5.5rem))] rounded-xl border border-[#f5cb55]/50 bg-[#071116]/95 p-2.5 shadow-xl"><div className="flex items-center gap-2"><div className="grid h-8 w-8 place-items-center rounded-lg bg-[#f5cb55] text-[#071116]"><Footprints size={17} /></div><div className="min-w-0 flex-1"><div className="truncate text-[10px] font-black tracking-[.1em] text-[#f9e29a]">LAST PING · {routeTarget.name.toUpperCase()}</div><div className="text-[10px] font-bold text-slate-400">{routeIsCurrent && !routeState?.loading && !routeState?.error ? `${formatRouteDistance(routeState.distanceMeters)} · ${formatRouteDuration(routeState.durationSeconds)}` : "Walking route from your location"}</div></div></div>{snapshotPlayers.length > 1 && <div className="mt-2 flex gap-1 overflow-x-auto pb-0.5">{snapshotPlayers.map(player => <button key={player.id} onClick={() => { setRouteTargetId(player.id); setRouteState(null); haptic(10); }} className={`whitespace-nowrap rounded-md px-2 py-1 text-[9px] font-black ${player.id === routeTarget.id ? "bg-[#f5cb55] text-[#071116]" : "bg-white/10 text-slate-300"}`}>{player.name}</button>)}</div>}<div className="mt-2 flex gap-2"><button onClick={() => void buildRoute()} disabled={routeState?.loading} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#f5cb55] px-3 py-2 text-[10px] font-black text-[#071116] disabled:opacity-60"><RouteIcon size={14} />{routeState?.loading ? "ROUTING…" : "ROUTE TO PING"}</button>{routeIsCurrent && <button onClick={() => { setRouteState(null); haptic(10); }} className="grid h-8 w-8 place-items-center rounded-lg bg-white/10 text-slate-200" aria-label="Clear route"><X size={15} /></button>}</div>{routeIsCurrent && routeState?.error && <p className="mt-2 text-[10px] font-bold text-[#ff9ba8]">{routeState.error}</p>}</div>}
+    {routeTarget && ownPosition && <div className="absolute bottom-4 left-4 z-20 max-w-[min(19rem,calc(100%-5.5rem))] rounded-xl border border-[#f5cb55]/50 bg-[#071116]/95 p-2.5 shadow-xl"><div className="flex items-center gap-2"><div className="grid h-8 w-8 place-items-center rounded-lg bg-[#f5cb55] text-[#071116]"><Footprints size={17} /></div><div className="min-w-0 flex-1"><div className="truncate text-[10px] font-black tracking-[.1em] text-[#f9e29a]">LAST PING · {routeTarget.name.toUpperCase()}</div><div className="text-[10px] font-bold text-slate-400">{routeNeedsRefresh ? "NEWER PING AVAILABLE" : routeIsCurrent && !routeState?.loading && !routeState?.error ? `${formatRouteDistance(routeState.distanceMeters)} · ${formatRouteDuration(routeState.durationSeconds)}` : "Walking route from your location"}</div></div></div>{snapshotPlayers.length > 1 && <div className="mt-2 flex gap-1 overflow-x-auto pb-0.5">{snapshotPlayers.map(player => <button key={player.id} onClick={() => { setRouteTargetId(player.id); setRouteState(null); haptic(10); }} className={`whitespace-nowrap rounded-md px-2 py-1 text-[9px] font-black ${player.id === routeTarget.id ? "bg-[#f5cb55] text-[#071116]" : "bg-white/10 text-slate-300"}`}>{player.name}</button>)}</div>}{routeNeedsRefresh && <div className="mt-2 rounded-lg border border-[#f5cb55]/35 bg-[#f5cb55]/10 px-2 py-1.5 text-[9px] font-black tracking-[.08em] text-[#f9e29a]">A NEWER LAST-LOCATION PING ARRIVED. YOUR CURRENT ROUTE IS UNCHANGED.</div>}<div className="mt-2 flex gap-2"><button onClick={() => void buildRoute()} disabled={routeState?.loading} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#f5cb55] px-3 py-2 text-[10px] font-black text-[#071116] disabled:opacity-60"><RouteIcon size={14} />{routeState?.loading ? "ROUTING…" : routeNeedsRefresh ? "REFRESH TO NEW PING" : routeIsCurrent ? "RECALCULATE ROUTE" : "ROUTE TO PING"}</button>{routeIsCurrent && <button onClick={() => { setRouteState(null); haptic(10); }} className="grid h-8 w-8 place-items-center rounded-lg bg-white/10 text-slate-200" aria-label="Clear route"><X size={15} /></button>}</div>{routeIsCurrent && routeState?.error && <p className="mt-2 text-[10px] font-bold text-[#ff9ba8]">{routeState.error}</p>}</div>}
     {minimumRadius && onMapClick && <div className="pointer-events-none absolute bottom-4 left-4 z-10 rounded-xl border border-[#f5cb55]/40 bg-[#071116]/90 px-3 py-2 text-[10px] font-black tracking-[0.1em] text-[#f9e29a]">DASHED ROUNDED SQUARE · MINIMUM {Math.round(minimumRadius)} M</div>}
     <div className="absolute bottom-4 right-4 z-20 grid gap-2"><button onClick={() => zoom(1)} className="field-map__control" aria-label="Zoom in"><ZoomIn size={19} /></button><button onClick={() => zoom(-1)} className="field-map__control" aria-label="Zoom out"><ZoomOut size={19} /></button><button onClick={recenter} className="field-map__control" aria-label="Recenter map"><Crosshair size={19} /></button></div>
     {!mapReady && <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center bg-[#071116]/45 text-center"><MapPinned className="mx-auto mb-3 animate-pulse text-teal-200" /><div className="text-xs font-black tracking-[0.16em] text-teal-100">LOADING FIELD MAP</div></div>}

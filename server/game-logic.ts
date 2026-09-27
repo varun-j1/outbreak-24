@@ -19,6 +19,37 @@ export const DEFAULT_RULES = {
 
 export type GameRules = typeof DEFAULT_RULES;
 export type Coordinate = { lat: number; lng: number };
+export type RecapPlayer = { id: string; displayName: string; role: string; status: string };
+export type RecapClaim = { id: string; zombiePlayerId: string; targetPlayerId: string; status: string; resolution: string | null; createdAt: Date; resolvedAt: Date | null };
+
+/** Match outcomes are derived from authoritative player and resolved-claim records. */
+export function buildMatchRecap(players: RecapPlayer[], claims: RecapClaim[]) {
+  const names = new Map(players.map(player => [player.id, player.displayName]));
+  const captures = claims
+    .filter(claim => claim.resolution === "capture")
+    .sort((left, right) => (right.resolvedAt ?? right.createdAt).getTime() - (left.resolvedAt ?? left.createdAt).getTime())
+    .map(claim => ({
+      id: claim.id,
+      zombiePlayerId: claim.zombiePlayerId,
+      survivorPlayerId: claim.targetPlayerId,
+      zombieName: names.get(claim.zombiePlayerId) ?? "Unknown infected",
+      survivorName: names.get(claim.targetPlayerId) ?? "Unknown survivor",
+      happenedAt: (claim.resolvedAt ?? claim.createdAt).toISOString(),
+    }));
+  const escaped = players.filter(player => player.status === "escaped");
+  const forfeited = players.filter(player => player.status === "forfeited");
+  const infected = players.filter(player => player.role === "zombie");
+  return {
+    captures,
+    totals: {
+      captures: captures.length,
+      escaped: escaped.length,
+      forfeited: forfeited.length,
+      infected: infected.length,
+      survivorsRemaining: players.filter(player => player.role === "survivor" && player.status === "active").length,
+    },
+  };
+}
 
 const EARTH_RADIUS_M = 6_371_000;
 const toRadians = (value: number) => (value * Math.PI) / 180;
